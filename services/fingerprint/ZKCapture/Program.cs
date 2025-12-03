@@ -2,17 +2,25 @@
  * ZKCapture - ZK9500 Fingerprint Capture Console Application
  *
  * This console app interfaces with the ZKFinger SDK to provide
- * fingerprint capture and verification functionality.
+ * fingerprint capture, verification, and fast 1:N identification.
  *
  * Usage:
- *   ZKCapture.exe check              - Check if scanner is connected
- *   ZKCapture.exe capture            - Capture a fingerprint template
- *   ZKCapture.exe verify <t1> <t2>   - Verify two templates match
+ *   ZKCapture.exe check                    - Check if scanner is connected
+ *   ZKCapture.exe capture                  - Capture a fingerprint template
+ *   ZKCapture.exe verify <t1> <t2>         - Verify two templates match (1:1)
+ *   ZKCapture.exe identify <template> <db> - Fast 1:N identification against JSON database
+ *
+ * The 'identify' command uses ZK SDK's DBIdentify for fast matching:
+ * - Loads all templates into SDK's internal indexed database
+ * - Uses optimized matching algorithm (~50,000+ matches/second)
+ * - Returns matched fingerprint ID (CIF) if found
  *
  * Output: JSON format to stdout
  */
 
 using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -20,6 +28,20 @@ using libzkfpcsharp;
 
 namespace ZKCapture
 {
+    // Structure for fingerprint database entries
+    public class FingerprintEntry
+    {
+        public string? cif { get; set; }
+        public string? template { get; set; }
+        public string? finger_position { get; set; }
+        public string? customer_name { get; set; }
+    }
+
+    public class FingerprintDatabase
+    {
+        public List<FingerprintEntry>? fingerprints { get; set; }
+    }
+
     class Program
     {
         private static IntPtr mDevHandle = IntPtr.Zero;
@@ -32,11 +54,14 @@ namespace ZKCapture
         private static bool captured = false;
         private static int captureResult = -1;
 
+        // Matching threshold (ZK SDK typically uses 50-70)
+        private const int MATCH_THRESHOLD = 50;
+
         static void Main(string[] args)
         {
             if (args.Length == 0)
             {
-                OutputJson(new { success = false, message = "Usage: ZKCapture.exe [check|capture|verify]" });
+                OutputJson(new { success = false, message = "Usage: ZKCapture.exe [check|capture|verify|identify]" });
                 return;
             }
 
@@ -59,6 +84,14 @@ namespace ZKCapture
                             return;
                         }
                         VerifyTemplates(args[1], args[2]);
+                        break;
+                    case "identify":
+                        if (args.Length < 3)
+                        {
+                            OutputJson(new { success = false, message = "Usage: ZKCapture.exe identify <template> <database_json_file>" });
+                            return;
+                        }
+                        IdentifyFingerprint(args[1], args[2]);
                         break;
                     default:
                         OutputJson(new { success = false, message = $"Unknown command: {command}" });
@@ -236,7 +269,7 @@ namespace ZKCapture
                 int score = zkfp2.DBMatch(dbHandle, blob1, blob2);
 
                 // Score > 0 means match, typically threshold is around 50
-                bool isMatch = score > 0;
+                bool isMatch = score > MATCH_THRESHOLD;
 
                 OutputJson(new {
                     success = true,
@@ -247,6 +280,147 @@ namespace ZKCapture
             }
             finally
             {
+                zkfp2.DBFree(dbHandle);
+                zkfp2.Terminate();
+            }
+        }
+
+        /// <summary>
+        /// Fast 1:N fingerprint identification using ZK SDK's optimized DBIdentify
+        /// This loads all templates into the SDK's internal indexed database for fast matching
+        /// </summary>
+        static void IdentifyFingerprint(string queryTemplateBase64, string databaseFilePath)
+        {
+            var startTime = DateTime.Now;
+
+            // Initialize SDK
+            int ret = zkfp2.Init();
+            if (ret != zkfperrdef.ZKFP_ERR_OK)
+            {
+                OutputJson(new { success = false, found = false, message = $"SDK init failed (error: {ret})" });
+                return;
+            }
+
+            // Initialize DB for 1:N identification
+            IntPtr dbHandle = zkfp2.DBInit();
+            if (dbHandle == IntPtr.Zero)
+            {
+                zkfp2.Terminate();
+                OutputJson(new { success = false, found = false, message = "Failed to initialize database" });
+                return;
+            }
+
+            try
+            {
+                // Read database file
+                if (!File.Exists(databaseFilePath))
+                {
+                    OutputJson(new { success = false, found = false, message = $"Database file not found: {databaseFilePath}" });
+                    return;
+                }
+
+                string jsonContent = File.ReadAllText(databaseFilePath);
+                var database = JsonSerializer.Deserialize<FingerprintDatabase>(jsonContent);
+
+                if (database?.fingerprints == null || database.fingerprints.Count == 0)
+                {
+                    OutputJson(new { success = false, found = false, message = "No fingerprints in database" });
+                    return;
+                }
+
+                // Convert query template
+                byte[] queryBlob = zkfp2.Base64ToBlob(queryTemplateBase64);
+                if (queryBlob == null)
+                {
+                    OutputJson(new { success = false, found = false, message = "Invalid query template format" });
+                    return;
+                }
+
+                // Load all templates into SDK's internal database with indexed IDs
+                // The SDK uses an optimized data structure for fast matching
+                var cifMapping = new Dictionary<int, FingerprintEntry>();
+                int fingerprintId = 1;
+                int loadedCount = 0;
+
+                foreach (var entry in database.fingerprints)
+                {
+                    if (string.IsNullOrEmpty(entry.template)) continue;
+
+                    try
+                    {
+                        byte[] templateBlob = zkfp2.Base64ToBlob(entry.template);
+                        if (templateBlob != null)
+                        {
+                            // Add template to internal indexed database
+                            ret = zkfp2.DBAdd(dbHandle, fingerprintId, templateBlob);
+                            if (ret == zkfperrdef.ZKFP_ERR_OK)
+                            {
+                                cifMapping[fingerprintId] = entry;
+                                loadedCount++;
+                            }
+                            fingerprintId++;
+                        }
+                    }
+                    catch
+                    {
+                        // Skip invalid templates
+                        continue;
+                    }
+                }
+
+                var loadTime = (DateTime.Now - startTime).TotalMilliseconds;
+
+                if (loadedCount == 0)
+                {
+                    OutputJson(new { success = false, found = false, message = "No valid templates in database" });
+                    return;
+                }
+
+                // Perform fast 1:N identification using SDK's optimized algorithm
+                var matchStartTime = DateTime.Now;
+                int matchedId = 0;
+                int matchScore = 0;
+
+                ret = zkfp2.DBIdentify(dbHandle, queryBlob, ref matchedId, ref matchScore);
+
+                var matchTime = (DateTime.Now - matchStartTime).TotalMilliseconds;
+                var totalTime = (DateTime.Now - startTime).TotalMilliseconds;
+
+                if (ret == zkfperrdef.ZKFP_ERR_OK && matchedId > 0 && matchScore >= MATCH_THRESHOLD)
+                {
+                    // Found a match
+                    var matchedEntry = cifMapping[matchedId];
+                    OutputJson(new {
+                        success = true,
+                        found = true,
+                        cif = matchedEntry.cif,
+                        customer_name = matchedEntry.customer_name,
+                        finger_position = matchedEntry.finger_position,
+                        score = matchScore,
+                        database_size = loadedCount,
+                        load_time_ms = Math.Round(loadTime, 2),
+                        match_time_ms = Math.Round(matchTime, 2),
+                        total_time_ms = Math.Round(totalTime, 2),
+                        message = $"Fingerprint identified! CIF: {matchedEntry.cif}"
+                    });
+                }
+                else
+                {
+                    OutputJson(new {
+                        success = true,
+                        found = false,
+                        database_size = loadedCount,
+                        load_time_ms = Math.Round(loadTime, 2),
+                        match_time_ms = Math.Round(matchTime, 2),
+                        total_time_ms = Math.Round(totalTime, 2),
+                        message = "No matching fingerprint found in database"
+                    });
+                }
+            }
+            finally
+            {
+                // Clear database and cleanup
+                zkfp2.DBClear(dbHandle);
                 zkfp2.DBFree(dbHandle);
                 zkfp2.Terminate();
             }
