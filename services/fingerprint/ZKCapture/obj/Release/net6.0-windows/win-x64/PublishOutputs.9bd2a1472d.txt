@@ -1,0 +1,6 @@
+D:\smart_branch_backend\services\fingerprint\ZKCapture\bin\Release\net6.0-windows\win-x64\publish\ZKCapture.exe
+D:\smart_branch_backend\services\fingerprint\ZKCapture\bin\Release\net6.0-windows\win-x64\publish\ZKCapture.dll
+D:\smart_branch_backend\services\fingerprint\ZKCapture\bin\Release\net6.0-windows\win-x64\publish\ZKCapture.deps.json
+D:\smart_branch_backend\services\fingerprint\ZKCapture\bin\Release\net6.0-windows\win-x64\publish\ZKCapture.runtimeconfig.json
+D:\smart_branch_backend\services\fingerprint\ZKCapture\bin\Release\net6.0-windows\win-x64\publish\ZKCapture.pdb
+D:\smart_branch_backend\services\fingerprint\ZKCapture\bin\Release\net6.0-windows\win-x64\publish\libzkfpcsharp.dll

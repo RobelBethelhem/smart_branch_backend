@@ -38,16 +38,29 @@ async function executeZKCapture(args, timeout = 30000) {
                 return;
             }
 
-            // Try to parse JSON output
+            // Try to parse JSON output - find JSON in the output
             try {
-                const result = JSON.parse(stdout.trim());
-                resolve(result);
+                const output = stdout.trim();
+
+                // Find the JSON object in the output (it starts with { and ends with })
+                const jsonStart = output.indexOf('{');
+                const jsonEnd = output.lastIndexOf('}');
+
+                if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
+                    const jsonStr = output.substring(jsonStart, jsonEnd + 1);
+                    const result = JSON.parse(jsonStr);
+                    resolve(result);
+                } else {
+                    // Try parsing the whole output
+                    const result = JSON.parse(output);
+                    resolve(result);
+                }
             } catch (parseError) {
                 // If JSON parse fails, check if it's an error
                 if (error) {
                     reject(new Error(stderr || error.message));
                 } else {
-                    reject(new Error('Invalid response from ZKCapture: ' + stdout));
+                    reject(new Error('Invalid response from ZKCapture: ' + stdout.substring(0, 200)));
                 }
             }
         });

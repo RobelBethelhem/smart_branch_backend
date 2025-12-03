@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("ZKCapture")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+b5281df91ec2443d801b7aaf21ad4926a148c33c")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+23628e193c2e7302003871fc6b6166e9af328de4")]
 [assembly: System.Reflection.AssemblyProductAttribute("ZKCapture")]
 [assembly: System.Reflection.AssemblyTitleAttribute("ZKCapture")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
