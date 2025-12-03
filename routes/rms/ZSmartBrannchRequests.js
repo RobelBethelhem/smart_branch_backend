@@ -14,16 +14,18 @@ import { executeQuery } from "../../lib/db.js";
 import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import { fileURLToPath } from 'url';
 
 // Fingerprint service paths
 const __filename_fp = fileURLToPath(import.meta.url);
 const __dirname_fp = path.dirname(__filename_fp);
 const FINGERPRINT_SERVICE_PATH = path.join(__dirname_fp, '../../services/fingerprint');
-const FINGERPRINT_DB_PATH = path.join(FINGERPRINT_SERVICE_PATH, 'fingerprint_db.json');
+// Use system temp directory to avoid triggering nodemon restart
+const FINGERPRINT_DB_PATH = path.join(os.tmpdir(), 'fingerprint_db.json');
 
-// Helper function to run ZKCapture.exe identify command for fast 1:N matching
-async function identifyFingerprint(template, dbPath) {
+// Helper function to run ZKCapture.exe verify command for 1:1 matching
+async function verifyFingerprint(template1, template2) {
     return new Promise((resolve, reject) => {
         const zkCapturePath = path.join(FINGERPRINT_SERVICE_PATH, 'ZKCapture.exe');
 
@@ -32,7 +34,7 @@ async function identifyFingerprint(template, dbPath) {
             return;
         }
 
-        const proc = spawn(zkCapturePath, ['identify', template, dbPath]);
+        const proc = spawn(zkCapturePath, ['verify', template1, template2]);
         let stdout = '';
         let stderr = '';
 
@@ -46,8 +48,16 @@ async function identifyFingerprint(template, dbPath) {
 
         proc.on('close', (code) => {
             try {
-                const result = JSON.parse(stdout.trim());
-                resolve(result);
+                // Find JSON in output
+                const jsonStart = stdout.indexOf('{');
+                const jsonEnd = stdout.lastIndexOf('}');
+                if (jsonStart !== -1 && jsonEnd !== -1) {
+                    const jsonStr = stdout.substring(jsonStart, jsonEnd + 1);
+                    const result = JSON.parse(jsonStr);
+                    resolve(result);
+                } else {
+                    reject(new Error(`No JSON in output: ${stdout}`));
+                }
             } catch (e) {
                 reject(new Error(`Failed to parse result: ${stdout}`));
             }
@@ -4441,7 +4451,7 @@ router.get("/biometric/customer/:cif", auth, roleCheck(["Teller", "Maker"]), asy
 
 
 // Fingerprint authentication for customer-facing app
-// Uses fast 1:N identification via ZK SDK's DBIdentify
+// Uses ZK SDK verify for 1:1 matching against approved biometrics
 router.post("/biometric/authenticate", async (req, res) => {
     try {
         const { fingerprint_template } = req.body;
@@ -4463,63 +4473,37 @@ router.post("/biometric/authenticate", async (req, res) => {
             });
         }
 
-        // Prepare fingerprint database for fast 1:N identification
-        const fingerprintDb = {
-            fingerprints: approvedBiometrics.map(b => ({
-                cif: b.cif,
-                template: b.fingerprint_template,
-                finger_position: b.finger_position,
-                customer_name: b.customer_name
-            }))
-        };
+        console.log(`Checking fingerprint against ${approvedBiometrics.length} registered templates...`);
 
-        // Write temporary database file
-        fs.writeFileSync(FINGERPRINT_DB_PATH, JSON.stringify(fingerprintDb));
+        // Try to match fingerprint against stored templates using SDK verify
+        let matchedBiometric = null;
+        let matchScore = 0;
 
-        let matchResult;
-        try {
-            // Use ZK SDK's fast DBIdentify for 1:N matching
-            matchResult = await identifyFingerprint(fingerprint_template, FINGERPRINT_DB_PATH);
-        } catch (sdkError) {
-            console.error('SDK identification error:', sdkError);
-            // Fallback to simple comparison if SDK fails
-            let matchedBiometric = null;
-            for (const biometric of approvedBiometrics) {
-                if (biometric.fingerprint_template === fingerprint_template) {
+        for (const biometric of approvedBiometrics) {
+            try {
+                // Use ZK SDK verify for accurate matching
+                const verifyResult = await verifyFingerprint(fingerprint_template, biometric.fingerprint_template);
+
+                if (verifyResult.match && verifyResult.score > matchScore) {
                     matchedBiometric = biometric;
-                    break;
+                    matchScore = verifyResult.score;
+                    console.log(`Match found! CIF: ${biometric.cif}, Score: ${verifyResult.score}`);
+                    break; // Found a match, stop searching
                 }
-            }
-            if (matchedBiometric) {
-                matchResult = {
-                    success: true,
-                    found: true,
-                    cif: matchedBiometric.cif,
-                    customer_name: matchedBiometric.customer_name
-                };
-            } else {
-                matchResult = { success: true, found: false };
+            } catch (verifyError) {
+                console.error(`Verify error for CIF ${biometric.cif}:`, verifyError.message);
+                // Continue to next biometric
             }
         }
 
-        // Clean up temp file
-        try { fs.unlinkSync(FINGERPRINT_DB_PATH); } catch (e) {}
-
-        if (!matchResult.success) {
-            return res.status(500).json({
-                error: true,
-                message: matchResult.message || "Fingerprint matching failed"
-            });
-        }
-
-        if (!matchResult.found) {
+        if (!matchedBiometric) {
             return res.status(401).json({
                 error: true,
                 message: "Fingerprint not recognized. Please register your fingerprint at the branch."
             });
         }
 
-        const cif = matchResult.cif;
+        const cif = matchedBiometric.cif;
 
         // Get customer accounts from Flexcube
         const accountsQuery = `
@@ -4538,16 +4522,21 @@ router.post("/biometric/authenticate", async (req, res) => {
             });
         }
 
-        // Get customer name
-        const customerQuery = `
-            SELECT CUSTOMER_NO, CUSTOMER_NAME1
-            FROM FCUBSPRD.STTM_CUSTOMER
-            WHERE CUSTOMER_NO = :1
-        `;
-        const customerResult = await executeQuery(customerQuery, [cif]);
-        const customerName = customerResult.success && customerResult.data[0]
-            ? customerResult.data[0].CUSTOMER_NAME1
-            : matchedBiometric.customer_name;
+        // Get customer name from Flexcube or use stored name
+        let customerName = matchedBiometric.customer_name;
+        try {
+            const customerQuery = `
+                SELECT CUSTOMER_NO, CUSTOMER_NAME1
+                FROM FCUBSPRD.STTM_CUSTOMER
+                WHERE CUSTOMER_NO = :1
+            `;
+            const customerResult = await executeQuery(customerQuery, [cif]);
+            if (customerResult.success && customerResult.data && customerResult.data[0]) {
+                customerName = customerResult.data[0].CUSTOMER_NAME1;
+            }
+        } catch (e) {
+            console.log('Using stored customer name');
+        }
 
         // Return matched customer info and accounts
         res.status(200).json({
@@ -4557,6 +4546,7 @@ router.post("/biometric/authenticate", async (req, res) => {
                 cif: cif,
                 customer_name: customerName,
                 finger_position: matchedBiometric.finger_position,
+                match_score: matchScore,
                 accounts: accountsResult.data.map(acc => ({
                     account_number: acc.CUST_AC_NO,
                     account_name: acc.AC_DESC,
