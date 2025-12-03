@@ -4116,9 +4116,21 @@ async function assignTellerBySystem(branch) {
 // =====================================================
 
 // Register new biometric (Teller/Maker)
+// Helper function to check if a template is simulated
+function isSimulatedTemplate(base64Template) {
+    if (!base64Template) return false;
+    try {
+        const decoded = Buffer.from(base64Template, 'base64').toString('utf-8');
+        return decoded.includes('ZK9500_SIMULATED') ||
+               (decoded.includes('"type"') && decoded.includes('"version"') && decoded.startsWith('{'));
+    } catch {
+        return false;
+    }
+}
+
 router.post("/biometric/register", auth, roleCheck(["Teller", "Maker"]), async (req, res) => {
     try {
-        const { cif, fingerprint_template, finger_position, customer_name, account_number } = req.body;
+        const { cif, fingerprint_template, finger_position, customer_name, account_number, allow_simulated } = req.body;
 
         // Validate CIF is 7 digits
         if (!cif || !/^\d{7}$/.test(cif)) {
@@ -4133,6 +4145,16 @@ router.post("/biometric/register", auth, roleCheck(["Teller", "Maker"]), async (
             return res.status(400).json({
                 error: true,
                 message: "Fingerprint template is required"
+            });
+        }
+
+        // Check if template is simulated (fake)
+        const isSimulated = isSimulatedTemplate(fingerprint_template);
+        if (isSimulated && !allow_simulated) {
+            return res.status(400).json({
+                error: true,
+                message: "SIMULATED TEMPLATE DETECTED: The fingerprint scanner may not be connected or SDK is not working. Please ensure the ZK9500 scanner is connected and try again. Set allow_simulated=true to override (not recommended for production).",
+                simulated: true
             });
         }
 
@@ -4176,19 +4198,27 @@ router.post("/biometric/register", auth, roleCheck(["Teller", "Maker"]), async (
             registered_by_id: user._id,
             customer_name: customer_name || '',
             account_number: account_number || '',
-            registration_date: new Date()
+            registration_date: new Date(),
+            is_simulated: isSimulated // Track if template is simulated
         });
 
         await newBiometric.save();
 
+        const message = isSimulated
+            ? "WARNING: Biometric registered with SIMULATED template. This will NOT work for real authentication. Re-register with scanner connected."
+            : "Biometric registration submitted successfully. Pending admin approval.";
+
+        console.log(`Biometric registered for CIF ${cif} - Simulated: ${isSimulated}`);
+
         res.status(201).json({
             error: false,
-            message: "Biometric registration submitted successfully. Pending admin approval.",
+            message: message,
             data: {
                 id: newBiometric._id,
                 cif: newBiometric.cif,
                 status: newBiometric.status,
-                registration_date: newBiometric.registration_date
+                registration_date: newBiometric.registration_date,
+                simulated: isSimulated
             }
         });
 
@@ -4579,16 +4609,25 @@ router.post("/biometric/authenticate", async (req, res) => {
         let matchedBiometric = null;
         let matchScore = 0;
 
+        let isSimulatedMatch = false;
+
         try {
             const identifyResult = await identifyFingerprint(fingerprint_template, approvedBiometrics);
+            console.log('Identify result:', JSON.stringify(identifyResult));
 
-            if (identifyResult.found && identifyResult.cif) {
+            if (identifyResult.success && identifyResult.found && identifyResult.cif) {
                 // Find the matched biometric record
                 matchedBiometric = approvedBiometrics.find(b => b.cif === identifyResult.cif);
                 matchScore = identifyResult.score || 0;
-                console.log(`Match found! CIF: ${identifyResult.cif}, Score: ${matchScore}, Time: ${identifyResult.total_time_ms}ms`);
+                isSimulatedMatch = identifyResult.simulated || false;
+                const matchType = isSimulatedMatch ? '[SIMULATED]' : '[REAL]';
+                console.log(`${matchType} Match found! CIF: ${identifyResult.cif}, Score: ${matchScore}, Time: ${identifyResult.total_time_ms}ms`);
+            } else if (!identifyResult.success) {
+                // SDK failed, fall back to 1:1 verification
+                console.log('SDK identify failed:', identifyResult.message, '- falling back to 1:1 verification');
+                throw new Error(identifyResult.message || 'SDK identify failed');
             } else {
-                console.log(`No match found. Database size: ${identifyResult.database_size}, Time: ${identifyResult.total_time_ms}ms`);
+                console.log(`No match found. Database size: ${identifyResult.database_size}, Simulated: ${identifyResult.simulated}, Time: ${identifyResult.total_time_ms}ms`);
             }
         } catch (identifyError) {
             console.error('Fast identification failed, falling back to 1:1 verification:', identifyError.message);
@@ -4597,10 +4636,13 @@ router.post("/biometric/authenticate", async (req, res) => {
             for (const biometric of approvedBiometrics) {
                 try {
                     const verifyResult = await verifyFingerprint(fingerprint_template, biometric.fingerprint_template);
-                    if (verifyResult.match && verifyResult.score > matchScore) {
+                    console.log(`Verify result for CIF ${biometric.cif}:`, JSON.stringify(verifyResult));
+                    if (verifyResult.success && verifyResult.match && verifyResult.score > matchScore) {
                         matchedBiometric = biometric;
                         matchScore = verifyResult.score;
-                        console.log(`Match found (fallback)! CIF: ${biometric.cif}, Score: ${verifyResult.score}`);
+                        isSimulatedMatch = verifyResult.simulated || false;
+                        const matchType = isSimulatedMatch ? '[SIMULATED]' : '[REAL]';
+                        console.log(`${matchType} Match found (fallback)! CIF: ${biometric.cif}, Score: ${verifyResult.score}`);
                         break;
                     }
                 } catch (verifyError) {
@@ -4654,12 +4696,15 @@ router.post("/biometric/authenticate", async (req, res) => {
         // Return matched customer info and accounts
         res.status(200).json({
             error: false,
-            message: "Fingerprint authenticated successfully",
+            message: isSimulatedMatch
+                ? "Fingerprint authenticated (simulation mode - not production safe)"
+                : "Fingerprint authenticated successfully",
             data: {
                 cif: cif,
                 customer_name: customerName,
                 finger_position: matchedBiometric.finger_position,
                 match_score: matchScore,
+                simulated: isSimulatedMatch,
                 accounts: accountsResult.data.map(acc => ({
                     account_number: acc.CUST_AC_NO,
                     account_name: acc.AC_DESC,

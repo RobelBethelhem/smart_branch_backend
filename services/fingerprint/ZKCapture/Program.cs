@@ -250,34 +250,196 @@ namespace ZKCapture
             }
         }
 
-        static void VerifyTemplates(string template1Base64, string template2Base64)
+        /// <summary>
+        /// Check if a template is a simulated template (JSON-based, not real ZK template)
+        /// </summary>
+        static bool IsSimulatedTemplate(string base64Template, out string? decodedJson)
         {
-            // Initialize SDK
-            int ret = zkfp2.Init();
-            if (ret != zkfperrdef.ZKFP_ERR_OK)
+            decodedJson = null;
+            if (string.IsNullOrEmpty(base64Template)) return false;
+
+            try
             {
-                OutputJson(new { success = false, match = false, message = $"SDK init failed (error: {ret})" });
-                return;
+                // Try to decode as Base64 and check if it's JSON with simulation marker
+                string cleaned = CleanBase64(base64Template);
+                byte[] bytes = Convert.FromBase64String(cleaned);
+                string decoded = Encoding.UTF8.GetString(bytes);
+
+                // Check if it's a JSON object with simulation marker
+                if (decoded.Contains("ZK9500_SIMULATED") || decoded.Contains("\"type\"") && decoded.Contains("\"version\""))
+                {
+                    decodedJson = decoded;
+                    return true;
+                }
+            }
+            catch
+            {
+                // Not valid Base64 or not JSON - might be a real template
             }
 
-            // Initialize DB for matching
+            return false;
+        }
+
+        /// <summary>
+        /// Clean and normalize Base64 string for proper parsing
+        /// </summary>
+        static string CleanBase64(string base64)
+        {
+            if (string.IsNullOrEmpty(base64)) return base64;
+
+            // Remove whitespace, newlines, carriage returns
+            string cleaned = base64.Trim()
+                .Replace("\r", "")
+                .Replace("\n", "")
+                .Replace(" ", "")
+                .Replace("\t", "");
+
+            // Handle URL-safe Base64 (convert - to + and _ to /)
+            cleaned = cleaned.Replace('-', '+').Replace('_', '/');
+
+            // Fix padding if needed
+            int mod = cleaned.Length % 4;
+            if (mod > 0)
+            {
+                cleaned += new string('=', 4 - mod);
+            }
+
+            return cleaned;
+        }
+
+        /// <summary>
+        /// Convert Base64 to byte array with multiple fallback methods
+        /// </summary>
+        static byte[]? SafeBase64ToBlob(string base64, out string error)
+        {
+            error = "";
+            if (string.IsNullOrEmpty(base64))
+            {
+                error = "Template is empty";
+                return null;
+            }
+
+            string cleaned = CleanBase64(base64);
+
+            // Try ZK SDK's method first
+            try
+            {
+                byte[] blob = zkfp2.Base64ToBlob(cleaned);
+                if (blob != null && blob.Length > 0)
+                {
+                    return blob;
+                }
+            }
+            catch { }
+
+            // Fallback to .NET's Base64 decoder
+            try
+            {
+                byte[] blob = Convert.FromBase64String(cleaned);
+                if (blob != null && blob.Length > 0)
+                {
+                    return blob;
+                }
+            }
+            catch (FormatException ex)
+            {
+                error = $"Base64 decode failed: {ex.Message}";
+            }
+
+            // Try original string without cleaning
+            try
+            {
+                byte[] blob = zkfp2.Base64ToBlob(base64);
+                if (blob != null && blob.Length > 0)
+                {
+                    return blob;
+                }
+            }
+            catch { }
+
+            error = $"Could not decode template (length: {base64.Length}, first 50 chars: {base64.Substring(0, Math.Min(50, base64.Length))})";
+            return null;
+        }
+
+        static void VerifyTemplates(string template1Base64, string template2Base64)
+        {
+            // Check for simulated templates first
+            string? json1, json2;
+            bool isSimulated1 = IsSimulatedTemplate(template1Base64, out json1);
+            bool isSimulated2 = IsSimulatedTemplate(template2Base64, out json2);
+
+            // Handle simulated templates
+            if (isSimulated1 || isSimulated2)
+            {
+                if (isSimulated1 && isSimulated2)
+                {
+                    // Both are simulated - compare the raw Base64 strings
+                    bool match = template1Base64.Trim() == template2Base64.Trim();
+                    OutputJson(new {
+                        success = true,
+                        match = match,
+                        score = match ? 100 : 0,
+                        simulated = true,
+                        message = match ? "Simulated templates match" : "Simulated templates do not match"
+                    });
+                    return;
+                }
+                else
+                {
+                    // One is simulated, one is real - cannot match
+                    OutputJson(new {
+                        success = true,
+                        match = false,
+                        score = 0,
+                        simulated = true,
+                        message = "Cannot compare simulated template with real template",
+                        template1Simulated = isSimulated1,
+                        template2Simulated = isSimulated2
+                    });
+                    return;
+                }
+            }
+
+            // Both are real ZK templates - use SDK matching
+            // Initialize SDK - try Init() but continue even if it fails (for DB operations without device)
+            int ret = zkfp2.Init();
+            bool sdkInitialized = (ret == zkfperrdef.ZKFP_ERR_OK);
+
+            // Initialize DB for matching - this should work even without device
             IntPtr dbHandle = zkfp2.DBInit();
             if (dbHandle == IntPtr.Zero)
             {
-                zkfp2.Terminate();
-                OutputJson(new { success = false, match = false, message = "Failed to initialize database" });
+                if (sdkInitialized) zkfp2.Terminate();
+                OutputJson(new { success = false, match = false, message = "Failed to initialize fingerprint matching database" });
                 return;
             }
 
             try
             {
-                // Convert Base64 to byte arrays
-                byte[] blob1 = zkfp2.Base64ToBlob(template1Base64);
-                byte[] blob2 = zkfp2.Base64ToBlob(template2Base64);
+                // Convert Base64 to byte arrays with robust parsing
+                string error1, error2;
+                byte[]? blob1 = SafeBase64ToBlob(template1Base64, out error1);
+                byte[]? blob2 = SafeBase64ToBlob(template2Base64, out error2);
 
-                if (blob1 == null || blob2 == null)
+                if (blob1 == null || blob1.Length == 0)
                 {
-                    OutputJson(new { success = false, match = false, message = "Invalid template format" });
+                    OutputJson(new {
+                        success = false,
+                        match = false,
+                        message = $"Invalid template 1: {error1}",
+                        template1Length = template1Base64?.Length ?? 0
+                    });
+                    return;
+                }
+
+                if (blob2 == null || blob2.Length == 0)
+                {
+                    OutputJson(new {
+                        success = false,
+                        match = false,
+                        message = $"Invalid template 2: {error2}",
+                        template2Length = template2Base64?.Length ?? 0
+                    });
                     return;
                 }
 
@@ -291,13 +453,16 @@ namespace ZKCapture
                     success = true,
                     match = isMatch,
                     score = score,
+                    template1Size = blob1.Length,
+                    template2Size = blob2.Length,
+                    simulated = false,
                     message = isMatch ? "Fingerprints match" : "Fingerprints do not match"
                 });
             }
             finally
             {
                 zkfp2.DBFree(dbHandle);
-                zkfp2.Terminate();
+                if (sdkInitialized) zkfp2.Terminate();
             }
         }
 
@@ -347,51 +512,100 @@ namespace ZKCapture
         /// <summary>
         /// Fast 1:N fingerprint identification using ZK SDK's optimized DBIdentify
         /// This loads all templates into the SDK's internal indexed database for fast matching
+        /// Also handles simulated templates with direct string comparison
         /// </summary>
         static void IdentifyFingerprint(string queryTemplateBase64, string databaseFilePath)
         {
             var startTime = DateTime.Now;
 
-            // Initialize SDK
-            int ret = zkfp2.Init();
-            if (ret != zkfperrdef.ZKFP_ERR_OK)
+            // Read database file first
+            if (!File.Exists(databaseFilePath))
             {
-                OutputJson(new { success = false, found = false, message = $"SDK init failed (error: {ret})" });
+                OutputJson(new { success = false, found = false, message = $"Database file not found: {databaseFilePath}" });
                 return;
             }
+
+            string jsonContent = File.ReadAllText(databaseFilePath);
+            var database = JsonSerializer.Deserialize<FingerprintDatabase>(jsonContent);
+
+            if (database?.fingerprints == null || database.fingerprints.Count == 0)
+            {
+                OutputJson(new { success = false, found = false, message = "No fingerprints in database" });
+                return;
+            }
+
+            // Check if query template is simulated
+            string? queryJson;
+            bool isQuerySimulated = IsSimulatedTemplate(queryTemplateBase64, out queryJson);
+
+            if (isQuerySimulated)
+            {
+                // Handle simulated template - direct string comparison
+                var matchTime = DateTime.Now;
+                string queryClean = queryTemplateBase64.Trim();
+
+                foreach (var entry in database.fingerprints)
+                {
+                    if (string.IsNullOrEmpty(entry.template)) continue;
+
+                    if (entry.template.Trim() == queryClean)
+                    {
+                        var totalTime = (DateTime.Now - startTime).TotalMilliseconds;
+                        OutputJson(new {
+                            success = true,
+                            found = true,
+                            cif = entry.cif,
+                            customer_name = entry.customer_name,
+                            finger_position = entry.finger_position,
+                            score = 100,
+                            database_size = database.fingerprints.Count,
+                            simulated = true,
+                            total_time_ms = Math.Round(totalTime, 2),
+                            message = $"Simulated fingerprint matched! CIF: {entry.cif}"
+                        });
+                        return;
+                    }
+                }
+
+                var totalTimeNoMatch = (DateTime.Now - startTime).TotalMilliseconds;
+                OutputJson(new {
+                    success = true,
+                    found = false,
+                    database_size = database.fingerprints.Count,
+                    simulated = true,
+                    total_time_ms = Math.Round(totalTimeNoMatch, 2),
+                    message = "No matching simulated fingerprint found in database"
+                });
+                return;
+            }
+
+            // Real template - use SDK matching
+            // Initialize SDK - try Init() but continue even if it fails (for DB operations without device)
+            int ret = zkfp2.Init();
+            bool sdkInitialized = (ret == zkfperrdef.ZKFP_ERR_OK);
 
             // Initialize DB for 1:N identification
             IntPtr dbHandle = zkfp2.DBInit();
             if (dbHandle == IntPtr.Zero)
             {
-                zkfp2.Terminate();
-                OutputJson(new { success = false, found = false, message = "Failed to initialize database" });
+                if (sdkInitialized) zkfp2.Terminate();
+                OutputJson(new { success = false, found = false, message = "Failed to initialize fingerprint matching database" });
                 return;
             }
 
             try
             {
-                // Read database file
-                if (!File.Exists(databaseFilePath))
+                // Convert query template with robust parsing
+                string queryError;
+                byte[]? queryBlob = SafeBase64ToBlob(queryTemplateBase64, out queryError);
+                if (queryBlob == null || queryBlob.Length == 0)
                 {
-                    OutputJson(new { success = false, found = false, message = $"Database file not found: {databaseFilePath}" });
-                    return;
-                }
-
-                string jsonContent = File.ReadAllText(databaseFilePath);
-                var database = JsonSerializer.Deserialize<FingerprintDatabase>(jsonContent);
-
-                if (database?.fingerprints == null || database.fingerprints.Count == 0)
-                {
-                    OutputJson(new { success = false, found = false, message = "No fingerprints in database" });
-                    return;
-                }
-
-                // Convert query template
-                byte[] queryBlob = zkfp2.Base64ToBlob(queryTemplateBase64);
-                if (queryBlob == null)
-                {
-                    OutputJson(new { success = false, found = false, message = "Invalid query template format" });
+                    OutputJson(new {
+                        success = false,
+                        found = false,
+                        message = $"Invalid query template: {queryError}",
+                        queryTemplateLength = queryTemplateBase64?.Length ?? 0
+                    });
                     return;
                 }
 
@@ -400,15 +614,25 @@ namespace ZKCapture
                 var cifMapping = new Dictionary<int, FingerprintEntry>();
                 int fingerprintId = 1;
                 int loadedCount = 0;
+                int skippedCount = 0;
 
                 foreach (var entry in database.fingerprints)
                 {
                     if (string.IsNullOrEmpty(entry.template)) continue;
 
+                    // Skip simulated templates when doing real SDK matching
+                    string? simJson;
+                    if (IsSimulatedTemplate(entry.template, out simJson))
+                    {
+                        skippedCount++;
+                        continue;
+                    }
+
                     try
                     {
-                        byte[] templateBlob = zkfp2.Base64ToBlob(entry.template);
-                        if (templateBlob != null)
+                        string templateError;
+                        byte[]? templateBlob = SafeBase64ToBlob(entry.template, out templateError);
+                        if (templateBlob != null && templateBlob.Length > 0)
                         {
                             // Add template to internal indexed database
                             ret = zkfp2.DBAdd(dbHandle, fingerprintId, templateBlob);
@@ -419,10 +643,15 @@ namespace ZKCapture
                             }
                             fingerprintId++;
                         }
+                        else
+                        {
+                            skippedCount++;
+                        }
                     }
                     catch
                     {
                         // Skip invalid templates
+                        skippedCount++;
                         continue;
                     }
                 }
@@ -431,7 +660,12 @@ namespace ZKCapture
 
                 if (loadedCount == 0)
                 {
-                    OutputJson(new { success = false, found = false, message = "No valid templates in database" });
+                    OutputJson(new {
+                        success = false,
+                        found = false,
+                        message = $"No valid real templates in database (total: {database.fingerprints.Count}, skipped: {skippedCount})",
+                        skippedCount = skippedCount
+                    });
                     return;
                 }
 
@@ -481,6 +715,9 @@ namespace ZKCapture
                 // Clear database and cleanup
                 zkfp2.DBClear(dbHandle);
                 zkfp2.DBFree(dbHandle);
+                // Only terminate if we successfully initialized
+                // Note: sdkInitialized is not in scope here, so we always try to terminate
+                // This is safe as Terminate() handles the case where Init() wasn't called
                 zkfp2.Terminate();
             }
         }

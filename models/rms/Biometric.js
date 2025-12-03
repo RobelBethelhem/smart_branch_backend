@@ -73,6 +73,10 @@ const biometricSchema = new Schema({
         type: String,
         trim: true,
     },
+    is_simulated: {
+        type: Boolean,
+        default: false,
+    },
 });
 
 // Index for faster lookup by CIF and status
