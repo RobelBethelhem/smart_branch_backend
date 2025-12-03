@@ -1,0 +1,16 @@
+{
+  "name": "zk9500-fingerprint-service",
+  "version": "1.0.0",
+  "description": "WebSocket bridge service for ZK9500 fingerprint scanner",
+  "main": "fingerprintService.js",
+  "type": "module",
+  "scripts": {
+    "start": "node fingerprintService.js",
+    "dev": "node --watch fingerprintService.js"
+  },
+  "dependencies": {
+    "ws": "^8.14.2"
+  },
+  "author": "Smart Branch",
+  "license": "ISC"
+}

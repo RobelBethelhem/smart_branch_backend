@@ -5,6 +5,7 @@ import Withdraw from "../../models/rms/Withdraw.js"
 import Transfer from "../../models/rms/Transfer.js"
 import Other_Bank_Transfer from "../../models/rms/Other_Bank_Transfer.js"
 import Air_Ticket_Payment from "../../models/rms/Air_Ticket_Payment.js"
+import Biometric from "../../models/rms/Biometric.js"
 import mongoose from 'mongoose';
 import auth from "../../middleware/rms/auth.js";
 import roleCheck from "../../middleware/rms/roleCheck.js";
@@ -3953,11 +3954,458 @@ async function assignTellerBySystem(branch) {
 }
 
 
+// =====================================================
+// BIOMETRIC REGISTRATION ROUTES
+// =====================================================
+
+// Register new biometric (Teller/Maker)
+router.post("/biometric/register", auth, roleCheck(["Teller", "Maker"]), async (req, res) => {
+    try {
+        const { cif, fingerprint_template, finger_position, customer_name, account_number } = req.body;
+
+        // Validate CIF is 7 digits
+        if (!cif || !/^\d{7}$/.test(cif)) {
+            return res.status(400).json({
+                error: true,
+                message: "CIF must be a 7-digit number"
+            });
+        }
+
+        // Validate fingerprint template
+        if (!fingerprint_template) {
+            return res.status(400).json({
+                error: true,
+                message: "Fingerprint template is required"
+            });
+        }
+
+        // Get current user
+        const user = await User.findById(req.user._id).lean();
+
+        // Check if biometric already exists for this CIF with approved status
+        const existingBiometric = await Biometric.findOne({
+            cif: cif,
+            status: 'approved'
+        });
+
+        if (existingBiometric) {
+            return res.status(400).json({
+                error: true,
+                message: "Biometric already registered and approved for this CIF"
+            });
+        }
+
+        // Check if there's a pending registration for this CIF
+        const pendingBiometric = await Biometric.findOne({
+            cif: cif,
+            status: 'pending'
+        });
+
+        if (pendingBiometric) {
+            return res.status(400).json({
+                error: true,
+                message: "There is already a pending biometric registration for this CIF"
+            });
+        }
+
+        // Create new biometric registration
+        const newBiometric = new Biometric({
+            cif,
+            fingerprint_template,
+            finger_position: finger_position || 'right_index',
+            status: 'pending',
+            branch: user.branch,
+            registered_by: user.user,
+            registered_by_id: user._id,
+            customer_name: customer_name || '',
+            account_number: account_number || '',
+            registration_date: new Date()
+        });
+
+        await newBiometric.save();
+
+        res.status(201).json({
+            error: false,
+            message: "Biometric registration submitted successfully. Pending admin approval.",
+            data: {
+                id: newBiometric._id,
+                cif: newBiometric.cif,
+                status: newBiometric.status,
+                registration_date: newBiometric.registration_date
+            }
+        });
+
+    } catch (e) {
+        console.error("Error registering biometric:", e);
+        res.status(500).json({
+            error: true,
+            message: e.message || "Could not register biometric"
+        });
+    }
+});
+
+// Get biometrics registered by current user (Teller view)
+router.get("/biometric/my_registrations", auth, roleCheck(["Teller", "Maker"]), async (req, res) => {
+    try {
+        const user = await User.findById(req.user._id).lean();
+
+        const biometrics = await Biometric.find({
+            registered_by_id: user._id
+        }).sort({ registration_date: -1 }).lean();
+
+        res.status(200).json({
+            error: false,
+            data: biometrics
+        });
+
+    } catch (e) {
+        console.error("Error fetching biometrics:", e);
+        res.status(500).json({
+            error: true,
+            message: e.message || "Could not fetch biometrics"
+        });
+    }
+});
+
+// Get all biometrics for admin's branch (Admin view)
+router.get("/biometric/branch_registrations", auth, roleCheck(["Admin"]), async (req, res) => {
+    try {
+        const user = await User.findById(req.user._id).lean();
+
+        const biometrics = await Biometric.find({
+            branch: user.branch
+        }).sort({ registration_date: -1 }).lean();
+
+        res.status(200).json({
+            error: false,
+            data: biometrics
+        });
+
+    } catch (e) {
+        console.error("Error fetching branch biometrics:", e);
+        res.status(500).json({
+            error: true,
+            message: e.message || "Could not fetch branch biometrics"
+        });
+    }
+});
+
+// Get pending biometrics for admin's branch (Admin approval queue)
+router.get("/biometric/pending_approvals", auth, roleCheck(["Admin"]), async (req, res) => {
+    try {
+        const user = await User.findById(req.user._id).lean();
+
+        const biometrics = await Biometric.find({
+            branch: user.branch,
+            status: 'pending'
+        }).sort({ registration_date: -1 }).lean();
+
+        res.status(200).json({
+            error: false,
+            data: biometrics
+        });
+
+    } catch (e) {
+        console.error("Error fetching pending biometrics:", e);
+        res.status(500).json({
+            error: true,
+            message: e.message || "Could not fetch pending biometrics"
+        });
+    }
+});
+
+// Approve biometric registration (Admin)
+router.post("/biometric/approve", auth, roleCheck(["Admin"]), async (req, res) => {
+    try {
+        const { biometric_id } = req.body;
+
+        if (!biometric_id) {
+            return res.status(400).json({
+                error: true,
+                message: "Biometric ID is required"
+            });
+        }
+
+        const user = await User.findById(req.user._id).lean();
+
+        // Find the biometric record
+        const biometric = await Biometric.findById(biometric_id);
+
+        if (!biometric) {
+            return res.status(404).json({
+                error: true,
+                message: "Biometric record not found"
+            });
+        }
+
+        // Check if biometric is from same branch
+        if (biometric.branch !== user.branch) {
+            return res.status(403).json({
+                error: true,
+                message: "You can only approve biometrics from your branch"
+            });
+        }
+
+        // Check if already processed
+        if (biometric.status !== 'pending') {
+            return res.status(400).json({
+                error: true,
+                message: `Biometric is already ${biometric.status}`
+            });
+        }
+
+        // Update biometric status
+        biometric.status = 'approved';
+        biometric.approved_by = user.user;
+        biometric.approved_by_id = user._id;
+        biometric.approval_date = new Date();
+
+        await biometric.save();
+
+        res.status(200).json({
+            error: false,
+            message: "Biometric approved successfully",
+            data: {
+                id: biometric._id,
+                cif: biometric.cif,
+                status: biometric.status,
+                approval_date: biometric.approval_date
+            }
+        });
+
+    } catch (e) {
+        console.error("Error approving biometric:", e);
+        res.status(500).json({
+            error: true,
+            message: e.message || "Could not approve biometric"
+        });
+    }
+});
+
+// Reject biometric registration (Admin)
+router.post("/biometric/reject", auth, roleCheck(["Admin"]), async (req, res) => {
+    try {
+        const { biometric_id, rejection_reason } = req.body;
+
+        if (!biometric_id) {
+            return res.status(400).json({
+                error: true,
+                message: "Biometric ID is required"
+            });
+        }
+
+        const user = await User.findById(req.user._id).lean();
+
+        // Find the biometric record
+        const biometric = await Biometric.findById(biometric_id);
+
+        if (!biometric) {
+            return res.status(404).json({
+                error: true,
+                message: "Biometric record not found"
+            });
+        }
+
+        // Check if biometric is from same branch
+        if (biometric.branch !== user.branch) {
+            return res.status(403).json({
+                error: true,
+                message: "You can only reject biometrics from your branch"
+            });
+        }
+
+        // Check if already processed
+        if (biometric.status !== 'pending') {
+            return res.status(400).json({
+                error: true,
+                message: `Biometric is already ${biometric.status}`
+            });
+        }
+
+        // Update biometric status
+        biometric.status = 'rejected';
+        biometric.approved_by = user.user;
+        biometric.approved_by_id = user._id;
+        biometric.approval_date = new Date();
+        biometric.rejection_reason = rejection_reason || '';
+
+        await biometric.save();
+
+        res.status(200).json({
+            error: false,
+            message: "Biometric rejected",
+            data: {
+                id: biometric._id,
+                cif: biometric.cif,
+                status: biometric.status
+            }
+        });
+
+    } catch (e) {
+        console.error("Error rejecting biometric:", e);
+        res.status(500).json({
+            error: true,
+            message: e.message || "Could not reject biometric"
+        });
+    }
+});
+
+// Verify biometric by CIF (for login/authentication)
+router.post("/biometric/verify", auth, async (req, res) => {
+    try {
+        const { cif, fingerprint_template } = req.body;
+
+        if (!cif || !fingerprint_template) {
+            return res.status(400).json({
+                error: true,
+                message: "CIF and fingerprint template are required"
+            });
+        }
+
+        // Find approved biometric for this CIF
+        const biometric = await Biometric.findOne({
+            cif: cif,
+            status: 'approved'
+        }).lean();
+
+        if (!biometric) {
+            return res.status(404).json({
+                error: false,
+                verified: false,
+                message: "No approved biometric found for this CIF"
+            });
+        }
+
+        // In a real implementation, you would compare fingerprint templates
+        // using a fingerprint matching library/service
+        // For now, we'll do a simple string comparison
+        const isMatch = biometric.fingerprint_template === fingerprint_template;
+
+        res.status(200).json({
+            error: false,
+            verified: isMatch,
+            message: isMatch ? "Biometric verified successfully" : "Fingerprint does not match",
+            data: isMatch ? {
+                cif: biometric.cif,
+                customer_name: biometric.customer_name,
+                account_number: biometric.account_number
+            } : null
+        });
+
+    } catch (e) {
+        console.error("Error verifying biometric:", e);
+        res.status(500).json({
+            error: true,
+            message: e.message || "Could not verify biometric"
+        });
+    }
+});
+
+// Get biometric by CIF (check if exists)
+router.get("/biometric/check/:cif", auth, async (req, res) => {
+    try {
+        const { cif } = req.params;
+
+        if (!cif || !/^\d{7}$/.test(cif)) {
+            return res.status(400).json({
+                error: true,
+                message: "Valid 7-digit CIF is required"
+            });
+        }
+
+        const biometric = await Biometric.findOne({
+            cif: cif
+        }).select('cif status customer_name registration_date approval_date').lean();
+
+        res.status(200).json({
+            error: false,
+            exists: !!biometric,
+            data: biometric
+        });
+
+    } catch (e) {
+        console.error("Error checking biometric:", e);
+        res.status(500).json({
+            error: true,
+            message: e.message || "Could not check biometric"
+        });
+    }
+});
 
 
 
 
 
+
+// Get customer info by CIF from Oracle Flexcube
+router.get("/biometric/customer/:cif", auth, roleCheck(["Teller", "Maker"]), async (req, res) => {
+    try {
+        const { cif } = req.params;
+
+        if (!cif || !/^\d{7}$/.test(cif)) {
+            return res.status(400).json({
+                error: true,
+                message: "Valid 7-digit CIF is required"
+            });
+        }
+
+        const customerQuery = `
+            SELECT
+                CP.CUSTOMER_NO AS CIF,
+                CP.FIRST_NAME,
+                CP.MIDDLE_NAME,
+                CP.LAST_NAME,
+                CP.FULL_NAME,
+                CP.MOBILE_NUMBER,
+                CP.EMAIL
+            FROM FCUBSPRD.STTM_CUST_PERSONAL CP
+            WHERE CP.CUSTOMER_NO = :1
+        `;
+
+        const customerResult = await executeQuery(customerQuery, [cif]);
+
+        if (!customerResult.success) {
+            return res.status(500).json({
+                error: true,
+                message: "Failed to query customer database"
+            });
+        }
+
+        if (!customerResult.data || customerResult.data.length === 0) {
+            return res.status(404).json({
+                error: true,
+                found: false,
+                message: "Customer not found with this CIF"
+            });
+        }
+
+        const customer = customerResult.data[0];
+        let fullName = customer.FULL_NAME;
+        if (!fullName) {
+            fullName = [customer.FIRST_NAME, customer.MIDDLE_NAME, customer.LAST_NAME]
+                .filter(Boolean)
+                .join(' ');
+        }
+
+        res.status(200).json({
+            error: false,
+            found: true,
+            data: {
+                cif: customer.CIF,
+                customer_name: fullName,
+                mobile: customer.MOBILE_NUMBER,
+                email: customer.EMAIL
+            }
+        });
+
+    } catch (e) {
+        console.error("Error fetching customer by CIF:", e);
+        res.status(500).json({
+            error: true,
+            message: e.message || "Could not fetch customer information"
+        });
+    }
+});
 
   export default router;
 

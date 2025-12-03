@@ -1,0 +1,39 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v6.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v6.0": {
+      "ZKCapture/1.0.0": {
+        "dependencies": {
+          "libzkfpcsharp": "1.0.0.1"
+        },
+        "runtime": {
+          "ZKCapture.dll": {}
+        }
+      },
+      "libzkfpcsharp/1.0.0.1": {
+        "runtime": {
+          "libzkfpcsharp.dll": {
+            "assemblyVersion": "1.0.0.1",
+            "fileVersion": "1.0.0.1"
+          }
+        }
+      }
+    }
+  },
+  "libraries": {
+    "ZKCapture/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "libzkfpcsharp/1.0.0.1": {
+      "type": "reference",
+      "serviceable": false,
+      "sha512": ""
+    }
+  }
+}
