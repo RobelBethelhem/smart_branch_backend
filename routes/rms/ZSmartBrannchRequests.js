@@ -4350,16 +4350,9 @@ router.get("/biometric/customer/:cif", auth, roleCheck(["Teller", "Maker"]), asy
         }
 
         const customerQuery = `
-            SELECT
-                CP.CUSTOMER_NO AS CIF,
-                CP.FIRST_NAME,
-                CP.MIDDLE_NAME,
-                CP.LAST_NAME,
-                CP.FULL_NAME,
-                CP.MOBILE_NUMBER,
-                CP.EMAIL
-            FROM FCUBSPRD.STTM_CUST_PERSONAL CP
-            WHERE CP.CUSTOMER_NO = :1
+            SELECT CUSTOMER_NO, CUSTOMER_NAME1
+            FROM FCUBSPRD.STTM_CUSTOMER
+            WHERE CUSTOMER_NO = :1
         `;
 
         const customerResult = await executeQuery(customerQuery, [cif]);
@@ -4380,21 +4373,13 @@ router.get("/biometric/customer/:cif", auth, roleCheck(["Teller", "Maker"]), asy
         }
 
         const customer = customerResult.data[0];
-        let fullName = customer.FULL_NAME;
-        if (!fullName) {
-            fullName = [customer.FIRST_NAME, customer.MIDDLE_NAME, customer.LAST_NAME]
-                .filter(Boolean)
-                .join(' ');
-        }
 
         res.status(200).json({
             error: false,
             found: true,
             data: {
-                cif: customer.CIF,
-                customer_name: fullName,
-                mobile: customer.MOBILE_NUMBER,
-                email: customer.EMAIL
+                cif: customer.CUSTOMER_NO,
+                customer_name: customer.CUSTOMER_NAME1
             }
         });
 
