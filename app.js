@@ -1,6 +1,8 @@
 import express from "express";
 import { config } from "dotenv";
+config(); // Load env variables first before other imports that need them
 import dbConnect from "./dbConnect.js";
+import "./lib/db.js"; // Initialize Oracle client
 import authRoutes from "./routes/rms/auth.js";
 import refreshTokenRoutes from "./routes/rms/refreshToken.js";
 import userRoutes from "./routes/rms/users.js";
@@ -101,7 +103,6 @@ app.use(express.static(publicDirectory));
 
 
 
-config();
 dbConnect();
 
 app.use(express.json()); // Parse incoming requests data
