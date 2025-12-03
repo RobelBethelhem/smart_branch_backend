@@ -85,6 +85,14 @@ namespace ZKCapture
                         }
                         VerifyTemplates(args[1], args[2]);
                         break;
+                    case "verifyfile":
+                        if (args.Length < 3)
+                        {
+                            OutputJson(new { success = false, message = "Usage: ZKCapture.exe verifyfile <template1_file> <template2_file>" });
+                            return;
+                        }
+                        VerifyTemplatesFromFiles(args[1], args[2]);
+                        break;
                     case "identify":
                         if (args.Length < 3)
                         {
@@ -92,6 +100,14 @@ namespace ZKCapture
                             return;
                         }
                         IdentifyFingerprint(args[1], args[2]);
+                        break;
+                    case "identifyfile":
+                        if (args.Length < 3)
+                        {
+                            OutputJson(new { success = false, message = "Usage: ZKCapture.exe identifyfile <template_file> <database_json_file>" });
+                            return;
+                        }
+                        IdentifyFingerprintFromFile(args[1], args[2]);
                         break;
                     default:
                         OutputJson(new { success = false, message = $"Unknown command: {command}" });
@@ -283,6 +299,49 @@ namespace ZKCapture
                 zkfp2.DBFree(dbHandle);
                 zkfp2.Terminate();
             }
+        }
+
+        /// <summary>
+        /// Verify two fingerprint templates from files (handles long Base64 strings)
+        /// </summary>
+        static void VerifyTemplatesFromFiles(string template1FilePath, string template2FilePath)
+        {
+            // Read templates from files
+            if (!File.Exists(template1FilePath))
+            {
+                OutputJson(new { success = false, match = false, message = $"Template file 1 not found: {template1FilePath}" });
+                return;
+            }
+
+            if (!File.Exists(template2FilePath))
+            {
+                OutputJson(new { success = false, match = false, message = $"Template file 2 not found: {template2FilePath}" });
+                return;
+            }
+
+            string template1Base64 = File.ReadAllText(template1FilePath).Trim();
+            string template2Base64 = File.ReadAllText(template2FilePath).Trim();
+
+            // Use the existing verify logic
+            VerifyTemplates(template1Base64, template2Base64);
+        }
+
+        /// <summary>
+        /// Fast 1:N identification from file (handles long Base64 query templates)
+        /// </summary>
+        static void IdentifyFingerprintFromFile(string queryTemplateFilePath, string databaseFilePath)
+        {
+            // Read query template from file
+            if (!File.Exists(queryTemplateFilePath))
+            {
+                OutputJson(new { success = false, found = false, message = $"Query template file not found: {queryTemplateFilePath}" });
+                return;
+            }
+
+            string queryTemplateBase64 = File.ReadAllText(queryTemplateFilePath).Trim();
+
+            // Use the existing identify logic
+            IdentifyFingerprint(queryTemplateBase64, databaseFilePath);
         }
 
         /// <summary>

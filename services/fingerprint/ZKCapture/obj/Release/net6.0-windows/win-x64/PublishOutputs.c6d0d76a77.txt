@@ -1,0 +1,6 @@
+D:\smart_branch_backend\services\fingerprint\ZKCapture.exe
+D:\smart_branch_backend\services\fingerprint\ZKCapture.dll
+D:\smart_branch_backend\services\fingerprint\ZKCapture.deps.json
+D:\smart_branch_backend\services\fingerprint\ZKCapture.runtimeconfig.json
+D:\smart_branch_backend\services\fingerprint\ZKCapture.pdb
+D:\smart_branch_backend\services\fingerprint\libzkfpcsharp.dll

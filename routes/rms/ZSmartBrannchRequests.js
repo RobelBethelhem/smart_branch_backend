@@ -25,6 +25,7 @@ const FINGERPRINT_SERVICE_PATH = path.join(__dirname_fp, '../../services/fingerp
 const FINGERPRINT_DB_PATH = path.join(os.tmpdir(), 'fingerprint_db.json');
 
 // Helper function to run ZKCapture.exe verify command for 1:1 matching
+// Uses temp files to avoid command line length issues with Base64 templates
 async function verifyFingerprint(template1, template2) {
     return new Promise((resolve, reject) => {
         const zkCapturePath = path.join(FINGERPRINT_SERVICE_PATH, 'ZKCapture.exe');
@@ -34,7 +35,21 @@ async function verifyFingerprint(template1, template2) {
             return;
         }
 
-        const proc = spawn(zkCapturePath, ['verify', template1, template2]);
+        // Write templates to temp files to avoid command line issues
+        const tempDir = os.tmpdir();
+        const template1Path = path.join(tempDir, `fp_template1_${Date.now()}.txt`);
+        const template2Path = path.join(tempDir, `fp_template2_${Date.now()}.txt`);
+
+        try {
+            fs.writeFileSync(template1Path, template1);
+            fs.writeFileSync(template2Path, template2);
+        } catch (e) {
+            reject(new Error('Failed to write temp files'));
+            return;
+        }
+
+        // Use verifyfile command with file paths
+        const proc = spawn(zkCapturePath, ['verifyfile', template1Path, template2Path]);
         let stdout = '';
         let stderr = '';
 
@@ -47,6 +62,10 @@ async function verifyFingerprint(template1, template2) {
         });
 
         proc.on('close', (code) => {
+            // Clean up temp files
+            try { fs.unlinkSync(template1Path); } catch (e) {}
+            try { fs.unlinkSync(template2Path); } catch (e) {}
+
             try {
                 // Find JSON in output
                 const jsonStart = stdout.indexOf('{');
@@ -64,6 +83,87 @@ async function verifyFingerprint(template1, template2) {
         });
 
         proc.on('error', (err) => {
+            // Clean up temp files
+            try { fs.unlinkSync(template1Path); } catch (e) {}
+            try { fs.unlinkSync(template2Path); } catch (e) {}
+            reject(err);
+        });
+    });
+}
+
+// Fast 1:N fingerprint identification using ZK SDK's DBIdentify
+// Much faster than looping through 1:1 verifications (~50,000+ matches/second)
+async function identifyFingerprint(queryTemplate, biometrics) {
+    return new Promise((resolve, reject) => {
+        const zkCapturePath = path.join(FINGERPRINT_SERVICE_PATH, 'ZKCapture.exe');
+
+        if (!fs.existsSync(zkCapturePath)) {
+            reject(new Error('ZKCapture.exe not found'));
+            return;
+        }
+
+        // Prepare fingerprint database JSON
+        const fingerprintDb = {
+            fingerprints: biometrics.map(b => ({
+                cif: b.cif,
+                template: b.fingerprint_template,
+                finger_position: b.finger_position,
+                customer_name: b.customer_name
+            }))
+        };
+
+        // Write both query template and database to temp files
+        const tempDir = os.tmpdir();
+        const timestamp = Date.now();
+        const dbPath = path.join(tempDir, `fp_db_${timestamp}.json`);
+        const queryPath = path.join(tempDir, `fp_query_${timestamp}.txt`);
+
+        try {
+            fs.writeFileSync(dbPath, JSON.stringify(fingerprintDb));
+            fs.writeFileSync(queryPath, queryTemplate);
+        } catch (e) {
+            reject(new Error('Failed to write temp files'));
+            return;
+        }
+
+        // Use identifyfile command to read query template from file (avoids command line length issues)
+        const proc = spawn(zkCapturePath, ['identifyfile', queryPath, dbPath]);
+        let stdout = '';
+        let stderr = '';
+
+        proc.stdout.on('data', (data) => {
+            stdout += data.toString();
+        });
+
+        proc.stderr.on('data', (data) => {
+            stderr += data.toString();
+        });
+
+        proc.on('close', (code) => {
+            // Clean up temp files
+            try { fs.unlinkSync(dbPath); } catch (e) {}
+            try { fs.unlinkSync(queryPath); } catch (e) {}
+
+            try {
+                // Find JSON in output
+                const jsonStart = stdout.indexOf('{');
+                const jsonEnd = stdout.lastIndexOf('}');
+                if (jsonStart !== -1 && jsonEnd !== -1) {
+                    const jsonStr = stdout.substring(jsonStart, jsonEnd + 1);
+                    const result = JSON.parse(jsonStr);
+                    resolve(result);
+                } else {
+                    reject(new Error(`No JSON in output: ${stdout}`));
+                }
+            } catch (e) {
+                reject(new Error(`Failed to parse result: ${stdout}`));
+            }
+        });
+
+        proc.on('error', (err) => {
+            // Clean up temp files
+            try { fs.unlinkSync(dbPath); } catch (e) {}
+            try { fs.unlinkSync(queryPath); } catch (e) {}
             reject(err);
         });
     });
@@ -4451,7 +4551,7 @@ router.get("/biometric/customer/:cif", auth, roleCheck(["Teller", "Maker"]), asy
 
 
 // Fingerprint authentication for customer-facing app
-// Uses ZK SDK verify for 1:1 matching against approved biometrics
+// Uses ZK SDK's fast 1:N DBIdentify for efficient matching (~50,000+ templates/second)
 router.post("/biometric/authenticate", async (req, res) => {
     try {
         const { fingerprint_template } = req.body;
@@ -4473,26 +4573,39 @@ router.post("/biometric/authenticate", async (req, res) => {
             });
         }
 
-        console.log(`Checking fingerprint against ${approvedBiometrics.length} registered templates...`);
+        console.log(`Fast 1:N identification against ${approvedBiometrics.length} registered templates...`);
 
-        // Try to match fingerprint against stored templates using SDK verify
+        // Use fast 1:N identification instead of looping through 1:1 verifications
         let matchedBiometric = null;
         let matchScore = 0;
 
-        for (const biometric of approvedBiometrics) {
-            try {
-                // Use ZK SDK verify for accurate matching
-                const verifyResult = await verifyFingerprint(fingerprint_template, biometric.fingerprint_template);
+        try {
+            const identifyResult = await identifyFingerprint(fingerprint_template, approvedBiometrics);
 
-                if (verifyResult.match && verifyResult.score > matchScore) {
-                    matchedBiometric = biometric;
-                    matchScore = verifyResult.score;
-                    console.log(`Match found! CIF: ${biometric.cif}, Score: ${verifyResult.score}`);
-                    break; // Found a match, stop searching
+            if (identifyResult.found && identifyResult.cif) {
+                // Find the matched biometric record
+                matchedBiometric = approvedBiometrics.find(b => b.cif === identifyResult.cif);
+                matchScore = identifyResult.score || 0;
+                console.log(`Match found! CIF: ${identifyResult.cif}, Score: ${matchScore}, Time: ${identifyResult.total_time_ms}ms`);
+            } else {
+                console.log(`No match found. Database size: ${identifyResult.database_size}, Time: ${identifyResult.total_time_ms}ms`);
+            }
+        } catch (identifyError) {
+            console.error('Fast identification failed, falling back to 1:1 verification:', identifyError.message);
+
+            // Fallback to 1:1 verification loop if fast identification fails
+            for (const biometric of approvedBiometrics) {
+                try {
+                    const verifyResult = await verifyFingerprint(fingerprint_template, biometric.fingerprint_template);
+                    if (verifyResult.match && verifyResult.score > matchScore) {
+                        matchedBiometric = biometric;
+                        matchScore = verifyResult.score;
+                        console.log(`Match found (fallback)! CIF: ${biometric.cif}, Score: ${verifyResult.score}`);
+                        break;
+                    }
+                } catch (verifyError) {
+                    console.error(`Verify error for CIF ${biometric.cif}:`, verifyError.message);
                 }
-            } catch (verifyError) {
-                console.error(`Verify error for CIF ${biometric.cif}:`, verifyError.message);
-                // Continue to next biometric
             }
         }
 
