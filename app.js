@@ -34,6 +34,7 @@ import Embassy from "./routes/rms/Embassy.js";
 import Supportive from "./routes/rms/Supportive.js";
 import Guaranty from "./routes/rms/Guaranty.js";
 import ZSmartBrannchRequests from "./routes/rms/ZSmartBrannchRequests.js";
+import LimitManagement from "./routes/rms/LimitManagement.js";
 
 
 
@@ -148,6 +149,7 @@ app.use("/api/rms/admin", [
   app.use("/api/supportive", Supportive);
   app.use("/api/embassy", Embassy);
   app.use("/api/zsmart_branch_requests", ZSmartBrannchRequests);
+  app.use("/api/limit-management", LimitManagement);
 
 
 
