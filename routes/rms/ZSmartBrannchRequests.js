@@ -4976,10 +4976,28 @@ router.post("/process-withdraw-with-denomination", auth, async (req, res) => {
 
         if (checkerCheck.needsChecker) {
             // Needs checker approval - set to pending_checker
+            // Save Maker (Initiator) information
             withdraw.status = 'pending_checker';
+            withdraw.maker_name = posted_by || req.user?.name;
+            withdraw.maker_id = req.user?.userId || req.user?.id;
+            withdraw.maker_date = new Date();
+            withdraw.maker_remarks = remarks || '';
             withdraw.posted_by = posted_by || req.user?.name;
             withdraw.posted_date = new Date();
             await withdraw.save();
+
+            console.log('\n' + '='.repeat(80));
+            console.log('[WITHDRAW_ROUTE] Transaction requires CHECKER APPROVAL');
+            console.log('='.repeat(80));
+            console.log('Withdraw ID:', withdraw_id);
+            console.log('Account:', withdraw.account_number);
+            console.log('Amount:', amount);
+            console.log('Threshold:', checkerCheck.threshold);
+            console.log('Maker (Initiator):', withdraw.maker_name);
+            console.log('Maker ID:', withdraw.maker_id);
+            console.log('Maker Date:', withdraw.maker_date);
+            console.log('Status:', 'pending_checker');
+            console.log('='.repeat(80) + '\n');
 
             return res.status(200).json({
                 error: false,
@@ -4987,7 +5005,12 @@ router.post("/process-withdraw-with-denomination", auth, async (req, res) => {
                 data: {
                     withdraw,
                     needsChecker: true,
-                    status: 'pending_checker'
+                    status: 'pending_checker',
+                    maker: {
+                        name: withdraw.maker_name,
+                        id: withdraw.maker_id,
+                        date: withdraw.maker_date
+                    }
                 }
             });
         }
@@ -5568,58 +5591,202 @@ router.post("/approve-pending-transaction", auth, async (req, res) => {
             });
         }
 
-        // Update checker fields
+        // Update checker (authorizer) fields
         transaction.checker_name = checker_name || req.user?.name;
+        transaction.checker_id = req.user?.userId || req.user?.id;
         transaction.checker_date = new Date();
         transaction.checker_remarks = checker_remarks;
+        transaction.checker_action = action === 'approve' ? 'approved' : 'rejected';
+
+        const amount = parseFloat(transaction.amount_in_figures);
 
         if (action === 'reject') {
             transaction.status = 'rejected';
             transaction.rejection_reason = checker_remarks || 'Rejected by checker';
             await transaction.save();
 
+            console.log('\n' + '='.repeat(80));
+            console.log('[CHECKER_APPROVAL] Transaction REJECTED');
+            console.log('='.repeat(80));
+            console.log('Transaction ID:', transaction_id);
+            console.log('Transaction Type:', transaction_type);
+            console.log('Amount:', amount);
+            console.log('Maker (Initiator):', transaction.maker_name || transaction.posted_by);
+            console.log('Maker Date:', transaction.maker_date || transaction.posted_date);
+            console.log('Checker (Authorizer):', transaction.checker_name);
+            console.log('Checker ID:', transaction.checker_id);
+            console.log('Checker Date:', transaction.checker_date);
+            console.log('Rejection Reason:', transaction.rejection_reason);
+            console.log('='.repeat(80) + '\n');
+
             return res.status(200).json({
                 error: false,
                 message: "Transaction rejected by checker",
                 data: {
                     transaction,
-                    action: 'rejected'
+                    action: 'rejected',
+                    maker: {
+                        name: transaction.maker_name || transaction.posted_by,
+                        date: transaction.maker_date || transaction.posted_date
+                    },
+                    checker: {
+                        name: transaction.checker_name,
+                        id: transaction.checker_id,
+                        date: transaction.checker_date,
+                        action: 'rejected'
+                    }
                 }
             });
         }
 
-        // Approve - process the transaction
-        transaction.status = 'posted';
-        transaction.trn_ref_no = trn_ref_no || `TRN${Date.now()}`;
+        // Approve - process the transaction via SOAP
+        console.log('\n' + '='.repeat(80));
+        console.log('[CHECKER_APPROVAL] Processing APPROVED transaction');
+        console.log('='.repeat(80));
+        console.log('Transaction ID:', transaction_id);
+        console.log('Transaction Type:', transaction_type);
+        console.log('Account:', transaction.account_number);
+        console.log('Amount:', amount);
+        console.log('XREF:', transaction.xref);
+        console.log('Maker (Initiator):', transaction.maker_name || transaction.posted_by);
+        console.log('Maker Date:', transaction.maker_date || transaction.posted_date);
+        console.log('Checker (Authorizer):', transaction.checker_name);
+        console.log('Checker ID:', transaction.checker_id);
+        console.log('Checker Date:', transaction.checker_date);
+        console.log('='.repeat(80) + '\n');
 
-        // Update till based on transaction type
+        // ============================================
+        // STEP 1: Execute SOAP Transaction to Flexcube
+        // ============================================
+        console.log('[CHECKER_APPROVAL] STEP 1: Executing SOAP Transaction to Flexcube...');
+
+        let soapResult;
+        if (transaction_type === 'Withdraw') {
+            soapResult = await FlexcubeTransactionService.createWithdrawTransaction({
+                customerAccount: transaction.account_number,
+                amount: amount,
+                tellerBranch: transaction.branch || FlexcubeTransactionService.extractBranchFromAccount(transaction.account_number),
+                glAccount: '1031110049409011',
+                xref: transaction.xref,
+                userId: transaction.checker_name || 'ABORANAT'
+            });
+        } else {
+            // Deposit - should not normally reach here as deposits don't need checker
+            soapResult = await FlexcubeTransactionService.createDepositTransaction({
+                customerAccount: transaction.account_number,
+                amount: amount,
+                tellerBranch: transaction.branch || FlexcubeTransactionService.extractBranchFromAccount(transaction.account_number),
+                glAccount: '1031110049409011',
+                xref: transaction.xref,
+                userId: transaction.checker_name || 'ABORANAT'
+            });
+        }
+
+        console.log('\n[CHECKER_APPROVAL] SOAP Result:', JSON.stringify({
+            success: soapResult.success,
+            trnRefNo: soapResult.trnRefNo,
+            error: soapResult.error,
+            httpStatus: soapResult.httpStatus
+        }, null, 2));
+
+        // Check if SOAP transaction succeeded
+        if (!soapResult.success) {
+            console.error('[CHECKER_APPROVAL] SOAP Transaction FAILED!');
+            console.error('Error:', soapResult.error);
+
+            // Save the failed response but keep as pending_checker for retry
+            transaction.flexcube_response = {
+                success: false,
+                error: soapResult.error,
+                rawResponse: soapResult.rawResponse?.substring(0, 1000),
+                timestamp: new Date()
+            };
+            // Reset checker action since SOAP failed
+            transaction.checker_action = null;
+            await transaction.save();
+
+            return res.status(400).json({
+                error: true,
+                message: `Flexcube transaction failed: ${soapResult.error}`,
+                data: {
+                    soapError: soapResult.error,
+                    transaction
+                }
+            });
+        }
+
+        console.log('[CHECKER_APPROVAL] SOAP Transaction SUCCESS!');
+        console.log('Flexcube TRN Ref:', soapResult.trnRefNo);
+
+        // ============================================
+        // STEP 2: Update transaction record
+        // ============================================
+        transaction.status = 'posted';
+        transaction.trn_ref_no = soapResult.trnRefNo || trn_ref_no || `TRN${Date.now()}`;
+        transaction.flexcube_response = {
+            success: true,
+            trnRefNo: soapResult.trnRefNo,
+            timestamp: new Date()
+        };
+
+        // ============================================
+        // STEP 3: Update Till based on transaction type
+        // ============================================
+        console.log('\n[CHECKER_APPROVAL] STEP 2: Starting Till Update...');
         try {
             if (transaction_type === 'Deposit') {
-                await FlexcubeTransactionService.updateTillForDeposit(
+                const tillResult = await FlexcubeTransactionService.updateTillForDeposit(
                     transaction.posted_by,
                     transaction.denomination
                 );
+                console.log('[CHECKER_APPROVAL] Till Update (Deposit) Result:', JSON.stringify(tillResult, null, 2));
             } else {
-                await FlexcubeTransactionService.updateTillForWithdraw(
+                const tillResult = await FlexcubeTransactionService.updateTillForWithdraw(
                     transaction.posted_by,
                     transaction.denomination
                 );
+                console.log('[CHECKER_APPROVAL] Till Update (Withdraw) Result:', JSON.stringify(tillResult, null, 2));
             }
             transaction.till_updated = true;
             transaction.till_update_date = new Date();
         } catch (tillError) {
-            console.error("Till update failed:", tillError);
+            console.error("[CHECKER_APPROVAL] Till update EXCEPTION:", tillError);
             transaction.till_updated = false;
         }
 
+        // ============================================
+        // STEP 4: Save and return success
+        // ============================================
+        console.log('[CHECKER_APPROVAL] STEP 3: Saving transaction...');
         await transaction.save();
+
+        console.log('\n' + '='.repeat(80));
+        console.log('[CHECKER_APPROVAL] TRANSACTION COMPLETE - APPROVED');
+        console.log('='.repeat(80));
+        console.log('Status:', transaction.status);
+        console.log('Flexcube TRN Ref:', transaction.trn_ref_no);
+        console.log('Till Updated:', transaction.till_updated);
+        console.log('Maker:', transaction.maker_name || transaction.posted_by);
+        console.log('Checker:', transaction.checker_name);
+        console.log('='.repeat(80) + '\n');
 
         res.status(200).json({
             error: false,
-            message: "Transaction approved and posted",
+            message: "Transaction approved and posted to Flexcube",
             data: {
                 transaction,
-                action: 'approved'
+                action: 'approved',
+                flexcubeTrnRef: soapResult.trnRefNo,
+                maker: {
+                    name: transaction.maker_name || transaction.posted_by,
+                    date: transaction.maker_date || transaction.posted_date
+                },
+                checker: {
+                    name: transaction.checker_name,
+                    id: transaction.checker_id,
+                    date: transaction.checker_date,
+                    action: 'approved'
+                }
             }
         });
 

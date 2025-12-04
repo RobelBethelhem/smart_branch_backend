@@ -154,7 +154,30 @@ const withdrawSchema = new Schema({
         type: Number,
         default: 0,
     },
+
+    // Maker (Initiator) information - the teller who initiated the transaction
+    maker_name: {
+        type: String,
+        trim: true,
+    },
+    maker_id: {
+        type: String,
+        trim: true,
+    },
+    maker_date: {
+        type: Date,
+    },
+    maker_remarks: {
+        type: String,
+        trim: true,
+    },
+
+    // Checker (Authorizer) information - the authorizer who approved the transaction
     checker_name: {
+        type: String,
+        trim: true,
+    },
+    checker_id: {
         type: String,
         trim: true,
     },
@@ -164,6 +187,11 @@ const withdrawSchema = new Schema({
     checker_remarks: {
         type: String,
         trim: true,
+    },
+    checker_action: {
+        type: String,
+        enum: ['approved', 'rejected', null],
+        default: null,
     },
 
     // NEW: Rejection reason
