@@ -16,6 +16,9 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { fileURLToPath } from 'url';
+import * as FlexcubeTransactionService from '../../services/FlexcubeTransactionService.js';
+import CustomerCategoryLimit from '../../models/rms/CustomerCategoryLimit.js';
+import MakerCheckerThreshold from '../../models/rms/MakerCheckerThreshold.js';
 
 // Fingerprint service paths
 const __filename_fp = fileURLToPath(import.meta.url);
@@ -4718,6 +4721,641 @@ router.post("/biometric/authenticate", async (req, res) => {
         res.status(500).json({
             error: true,
             message: e.message || "Authentication failed"
+        });
+    }
+});
+
+
+// ============================================
+// DENOMINATION AND LIMIT MANAGEMENT ROUTES
+// ============================================
+
+/**
+ * Auto-populate denomination based on amount
+ * Uses greedy algorithm to minimize number of notes/coins
+ */
+router.post("/autopopulate-denomination", auth, async (req, res) => {
+    try {
+        const { amount } = req.body;
+
+        if (!amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 0) {
+            return res.status(400).json({
+                error: true,
+                message: "Valid positive amount is required"
+            });
+        }
+
+        const denomination = FlexcubeTransactionService.autopopulateDenomination(parseFloat(amount));
+        const total = FlexcubeTransactionService.calculateDenominationTotal(denomination);
+
+        res.status(200).json({
+            error: false,
+            message: "Denomination calculated successfully",
+            data: {
+                denomination,
+                total,
+                difference: Math.abs(parseFloat(amount) - total)
+            }
+        });
+    } catch (e) {
+        console.error("Error in auto-populate denomination:", e);
+        res.status(500).json({
+            error: true,
+            message: e.message || "Failed to calculate denomination"
+        });
+    }
+});
+
+/**
+ * Validate denomination matches amount
+ */
+router.post("/validate-denomination", auth, async (req, res) => {
+    try {
+        const { amount, denomination } = req.body;
+
+        if (!amount || !denomination) {
+            return res.status(400).json({
+                error: true,
+                message: "Amount and denomination are required"
+            });
+        }
+
+        const total = FlexcubeTransactionService.calculateDenominationTotal(denomination);
+        const parsedAmount = parseFloat(amount);
+        const isValid = Math.abs(total - parsedAmount) < 0.01; // Allow tiny rounding difference
+
+        res.status(200).json({
+            error: false,
+            message: isValid ? "Denomination is valid" : "Denomination does not match amount",
+            data: {
+                isValid,
+                denominationTotal: total,
+                expectedAmount: parsedAmount,
+                difference: Math.abs(total - parsedAmount)
+            }
+        });
+    } catch (e) {
+        console.error("Error in validate denomination:", e);
+        res.status(500).json({
+            error: true,
+            message: e.message || "Failed to validate denomination"
+        });
+    }
+});
+
+/**
+ * Check withdrawal limit for a customer
+ * Returns limit info and whether transaction can proceed
+ */
+router.post("/check-withdrawal-limit", auth, async (req, res) => {
+    try {
+        const { account_number, amount } = req.body;
+
+        if (!account_number || !amount) {
+            return res.status(400).json({
+                error: true,
+                message: "Account number and amount are required"
+            });
+        }
+
+        const limitCheck = await FlexcubeTransactionService.checkWithdrawalLimit(
+            account_number,
+            parseFloat(amount)
+        );
+
+        res.status(200).json({
+            error: false,
+            message: limitCheck.allowed
+                ? "Withdrawal is within limits"
+                : `Withdrawal exceeds daily limit: ${limitCheck.reason}`,
+            data: limitCheck
+        });
+    } catch (e) {
+        console.error("Error in check withdrawal limit:", e);
+        res.status(500).json({
+            error: true,
+            message: e.message || "Failed to check withdrawal limit"
+        });
+    }
+});
+
+/**
+ * Check if amount requires maker-checker approval
+ */
+router.post("/check-maker-checker", auth, async (req, res) => {
+    try {
+        const { amount, currency = 'ETB' } = req.body;
+
+        if (!amount) {
+            return res.status(400).json({
+                error: true,
+                message: "Amount is required"
+            });
+        }
+
+        const checkerCheck = await FlexcubeTransactionService.checkMakerCheckerThreshold(
+            parseFloat(amount),
+            currency
+        );
+
+        res.status(200).json({
+            error: false,
+            message: checkerCheck.needsChecker
+                ? `Amount ${amount} requires checker approval (threshold: ${checkerCheck.threshold})`
+                : "No checker approval required",
+            data: checkerCheck
+        });
+    } catch (e) {
+        console.error("Error in check maker-checker:", e);
+        res.status(500).json({
+            error: true,
+            message: e.message || "Failed to check maker-checker threshold"
+        });
+    }
+});
+
+/**
+ * Process withdraw transaction with denomination (Teller posting)
+ * This handles the full withdrawal workflow including limit checks, denomination validation,
+ * maker-checker threshold, Flexcube SOAP transaction, and till updates
+ */
+router.post("/process-withdraw-with-denomination", auth, async (req, res) => {
+    try {
+        const {
+            withdraw_id,
+            denomination,
+            trn_ref_no,
+            posted_by,
+            remarks
+        } = req.body;
+
+        if (!withdraw_id) {
+            return res.status(400).json({
+                error: true,
+                message: "Withdraw ID is required"
+            });
+        }
+
+        // Find the withdraw request
+        const withdraw = await Withdraw.findById(withdraw_id);
+        if (!withdraw) {
+            return res.status(404).json({
+                error: true,
+                message: "Withdraw request not found"
+            });
+        }
+
+        // Validate status
+        if (!['assigned', 'assigned_by_csr'].includes(withdraw.status)) {
+            return res.status(400).json({
+                error: true,
+                message: `Cannot process withdraw with status: ${withdraw.status}`
+            });
+        }
+
+        const amount = parseFloat(withdraw.amount_in_figures);
+
+        // If denomination provided, validate it
+        let finalDenomination = denomination;
+        if (denomination) {
+            const denomTotal = FlexcubeTransactionService.calculateDenominationTotal(denomination);
+            if (Math.abs(denomTotal - amount) > 0.01) {
+                return res.status(400).json({
+                    error: true,
+                    message: `Denomination total (${denomTotal}) does not match amount (${amount})`
+                });
+            }
+        } else {
+            // Auto-populate denomination if not provided
+            finalDenomination = FlexcubeTransactionService.autopopulateDenomination(amount);
+        }
+
+        // Check withdrawal limit
+        const limitCheck = await FlexcubeTransactionService.checkWithdrawalLimit(
+            withdraw.account_number,
+            amount
+        );
+
+        if (!limitCheck.allowed) {
+            // Reject the transaction
+            withdraw.status = 'rejected';
+            withdraw.rejection_reason = limitCheck.reason;
+            withdraw.limit_check_passed = false;
+            withdraw.daily_limit = limitCheck.dailyLimit;
+            withdraw.daily_withdrawn_before = limitCheck.alreadyWithdrawn;
+            withdraw.customer_category = limitCheck.customerCategory;
+            await withdraw.save();
+
+            return res.status(400).json({
+                error: true,
+                message: `Withdrawal rejected: ${limitCheck.reason}`,
+                data: {
+                    limitCheck,
+                    status: 'rejected'
+                }
+            });
+        }
+
+        // Check maker-checker threshold
+        const checkerCheck = await FlexcubeTransactionService.checkMakerCheckerThreshold(amount);
+
+        // Generate XREF if not exists
+        if (!withdraw.xref) {
+            withdraw.xref = await Withdraw.generateXref();
+        }
+
+        // Update withdraw with limit and denomination info
+        withdraw.denomination = finalDenomination;
+        withdraw.denomination_total = FlexcubeTransactionService.calculateDenominationTotal(finalDenomination);
+        withdraw.limit_check_passed = true;
+        withdraw.daily_limit = limitCheck.dailyLimit;
+        withdraw.daily_withdrawn_before = limitCheck.alreadyWithdrawn;
+        withdraw.customer_category = limitCheck.customerCategory;
+        withdraw.needs_checker = checkerCheck.needsChecker;
+        withdraw.checker_threshold = checkerCheck.threshold;
+
+        if (checkerCheck.needsChecker) {
+            // Needs checker approval - set to pending_checker
+            withdraw.status = 'pending_checker';
+            withdraw.posted_by = posted_by || req.user?.name;
+            withdraw.posted_date = new Date();
+            await withdraw.save();
+
+            return res.status(200).json({
+                error: false,
+                message: `Transaction requires checker approval (amount ${amount} >= threshold ${checkerCheck.threshold})`,
+                data: {
+                    withdraw,
+                    needsChecker: true,
+                    status: 'pending_checker'
+                }
+            });
+        }
+
+        // No checker needed - process directly
+        // For now, just update status to posted (SOAP integration can be enabled later)
+        withdraw.status = 'posted';
+        withdraw.posted_by = posted_by || req.user?.name;
+        withdraw.posted_date = new Date();
+        withdraw.trn_ref_no = trn_ref_no || `TRN${Date.now()}`;
+
+        // Update till (deduct from teller's till for withdrawal)
+        try {
+            await FlexcubeTransactionService.updateTillForWithdraw(
+                posted_by || req.user?.userId,
+                finalDenomination
+            );
+            withdraw.till_updated = true;
+            withdraw.till_update_date = new Date();
+        } catch (tillError) {
+            console.error("Till update failed:", tillError);
+            // Continue even if till update fails - log the error
+            withdraw.till_updated = false;
+        }
+
+        await withdraw.save();
+
+        res.status(200).json({
+            error: false,
+            message: "Withdrawal processed successfully",
+            data: {
+                withdraw,
+                needsChecker: false,
+                status: 'posted'
+            }
+        });
+
+    } catch (e) {
+        console.error("Error in process withdraw with denomination:", e);
+        res.status(500).json({
+            error: true,
+            message: e.message || "Failed to process withdrawal"
+        });
+    }
+});
+
+/**
+ * Process deposit transaction with denomination (Teller posting)
+ */
+router.post("/process-deposit-with-denomination", auth, async (req, res) => {
+    try {
+        const {
+            deposit_id,
+            denomination,
+            trn_ref_no,
+            posted_by,
+            remarks
+        } = req.body;
+
+        if (!deposit_id) {
+            return res.status(400).json({
+                error: true,
+                message: "Deposit ID is required"
+            });
+        }
+
+        // Find the deposit request
+        const deposit = await Deposit.findById(deposit_id);
+        if (!deposit) {
+            return res.status(404).json({
+                error: true,
+                message: "Deposit request not found"
+            });
+        }
+
+        // Validate status
+        if (!['assigned', 'assigned_by_csr'].includes(deposit.status)) {
+            return res.status(400).json({
+                error: true,
+                message: `Cannot process deposit with status: ${deposit.status}`
+            });
+        }
+
+        const amount = parseFloat(deposit.amount_in_figures);
+
+        // If denomination provided, validate it
+        let finalDenomination = denomination;
+        if (denomination) {
+            const denomTotal = FlexcubeTransactionService.calculateDenominationTotal(denomination);
+            if (Math.abs(denomTotal - amount) > 0.01) {
+                return res.status(400).json({
+                    error: true,
+                    message: `Denomination total (${denomTotal}) does not match amount (${amount})`
+                });
+            }
+        } else {
+            // For deposit, denomination is typically provided by customer
+            // But we can auto-populate if needed
+            finalDenomination = FlexcubeTransactionService.autopopulateDenomination(amount);
+        }
+
+        // Check maker-checker threshold
+        const checkerCheck = await FlexcubeTransactionService.checkMakerCheckerThreshold(amount);
+
+        // Generate XREF if not exists
+        if (!deposit.xref) {
+            deposit.xref = await Deposit.generateXref();
+        }
+
+        // Update deposit with denomination info
+        deposit.denomination = finalDenomination;
+        deposit.denomination_total = FlexcubeTransactionService.calculateDenominationTotal(finalDenomination);
+        deposit.needs_checker = checkerCheck.needsChecker;
+        deposit.checker_threshold = checkerCheck.threshold;
+
+        if (checkerCheck.needsChecker) {
+            // Needs checker approval - set to pending_checker
+            deposit.status = 'pending_checker';
+            deposit.posted_by = posted_by || req.user?.name;
+            deposit.posted_date = new Date();
+            await deposit.save();
+
+            return res.status(200).json({
+                error: false,
+                message: `Transaction requires checker approval (amount ${amount} >= threshold ${checkerCheck.threshold})`,
+                data: {
+                    deposit,
+                    needsChecker: true,
+                    status: 'pending_checker'
+                }
+            });
+        }
+
+        // No checker needed - process directly
+        deposit.status = 'posted';
+        deposit.posted_by = posted_by || req.user?.name;
+        deposit.posted_date = new Date();
+        deposit.trn_ref_no = trn_ref_no || `TRN${Date.now()}`;
+
+        // Update till (add to teller's till for deposit)
+        try {
+            await FlexcubeTransactionService.updateTillForDeposit(
+                posted_by || req.user?.userId,
+                finalDenomination
+            );
+            deposit.till_updated = true;
+            deposit.till_update_date = new Date();
+        } catch (tillError) {
+            console.error("Till update failed:", tillError);
+            deposit.till_updated = false;
+        }
+
+        await deposit.save();
+
+        res.status(200).json({
+            error: false,
+            message: "Deposit processed successfully",
+            data: {
+                deposit,
+                needsChecker: false,
+                status: 'posted'
+            }
+        });
+
+    } catch (e) {
+        console.error("Error in process deposit with denomination:", e);
+        res.status(500).json({
+            error: true,
+            message: e.message || "Failed to process deposit"
+        });
+    }
+});
+
+/**
+ * Get transactions pending checker approval
+ * For Authorizer/Checker role
+ */
+router.get("/pending-checker-transactions", auth, async (req, res) => {
+    try {
+        const { branch } = req.query;
+
+        const query = { status: 'pending_checker' };
+        if (branch) {
+            query.branch = branch;
+        }
+
+        // Get pending deposits and withdrawals
+        const [pendingDeposits, pendingWithdraws] = await Promise.all([
+            Deposit.find(query).sort({ posted_date: -1 }),
+            Withdraw.find(query).sort({ posted_date: -1 })
+        ]);
+
+        // Combine and add type field
+        const pendingTransactions = [
+            ...pendingDeposits.map(d => ({ ...d.toObject(), transaction_type: 'Deposit' })),
+            ...pendingWithdraws.map(w => ({ ...w.toObject(), transaction_type: 'Withdraw' }))
+        ].sort((a, b) => new Date(b.posted_date) - new Date(a.posted_date));
+
+        res.status(200).json({
+            error: false,
+            message: `Found ${pendingTransactions.length} transactions pending checker approval`,
+            data: pendingTransactions
+        });
+
+    } catch (e) {
+        console.error("Error fetching pending checker transactions:", e);
+        res.status(500).json({
+            error: true,
+            message: e.message || "Failed to fetch pending transactions"
+        });
+    }
+});
+
+/**
+ * Approve or reject pending transaction (Checker action)
+ */
+router.post("/approve-pending-transaction", auth, async (req, res) => {
+    try {
+        const {
+            transaction_id,
+            transaction_type, // 'Deposit' or 'Withdraw'
+            action, // 'approve' or 'reject'
+            checker_name,
+            checker_remarks,
+            trn_ref_no
+        } = req.body;
+
+        if (!transaction_id || !transaction_type || !action) {
+            return res.status(400).json({
+                error: true,
+                message: "Transaction ID, type, and action are required"
+            });
+        }
+
+        if (!['approve', 'reject'].includes(action)) {
+            return res.status(400).json({
+                error: true,
+                message: "Action must be 'approve' or 'reject'"
+            });
+        }
+
+        let transaction;
+        if (transaction_type === 'Deposit') {
+            transaction = await Deposit.findById(transaction_id);
+        } else if (transaction_type === 'Withdraw') {
+            transaction = await Withdraw.findById(transaction_id);
+        } else {
+            return res.status(400).json({
+                error: true,
+                message: "Invalid transaction type"
+            });
+        }
+
+        if (!transaction) {
+            return res.status(404).json({
+                error: true,
+                message: "Transaction not found"
+            });
+        }
+
+        if (transaction.status !== 'pending_checker') {
+            return res.status(400).json({
+                error: true,
+                message: `Transaction is not pending checker approval (current status: ${transaction.status})`
+            });
+        }
+
+        // Update checker fields
+        transaction.checker_name = checker_name || req.user?.name;
+        transaction.checker_date = new Date();
+        transaction.checker_remarks = checker_remarks;
+
+        if (action === 'reject') {
+            transaction.status = 'rejected';
+            transaction.rejection_reason = checker_remarks || 'Rejected by checker';
+            await transaction.save();
+
+            return res.status(200).json({
+                error: false,
+                message: "Transaction rejected by checker",
+                data: {
+                    transaction,
+                    action: 'rejected'
+                }
+            });
+        }
+
+        // Approve - process the transaction
+        transaction.status = 'posted';
+        transaction.trn_ref_no = trn_ref_no || `TRN${Date.now()}`;
+
+        // Update till based on transaction type
+        try {
+            if (transaction_type === 'Deposit') {
+                await FlexcubeTransactionService.updateTillForDeposit(
+                    transaction.posted_by,
+                    transaction.denomination
+                );
+            } else {
+                await FlexcubeTransactionService.updateTillForWithdraw(
+                    transaction.posted_by,
+                    transaction.denomination
+                );
+            }
+            transaction.till_updated = true;
+            transaction.till_update_date = new Date();
+        } catch (tillError) {
+            console.error("Till update failed:", tillError);
+            transaction.till_updated = false;
+        }
+
+        await transaction.save();
+
+        res.status(200).json({
+            error: false,
+            message: "Transaction approved and posted",
+            data: {
+                transaction,
+                action: 'approved'
+            }
+        });
+
+    } catch (e) {
+        console.error("Error in approve pending transaction:", e);
+        res.status(500).json({
+            error: true,
+            message: e.message || "Failed to process approval"
+        });
+    }
+});
+
+/**
+ * Get transaction details with denomination info
+ */
+router.get("/transaction-details/:type/:id", auth, async (req, res) => {
+    try {
+        const { type, id } = req.params;
+
+        let transaction;
+        if (type === 'deposit') {
+            transaction = await Deposit.findById(id);
+        } else if (type === 'withdraw') {
+            transaction = await Withdraw.findById(id);
+        } else {
+            return res.status(400).json({
+                error: true,
+                message: "Invalid transaction type. Use 'deposit' or 'withdraw'"
+            });
+        }
+
+        if (!transaction) {
+            return res.status(404).json({
+                error: true,
+                message: "Transaction not found"
+            });
+        }
+
+        res.status(200).json({
+            error: false,
+            message: "Transaction details retrieved",
+            data: transaction
+        });
+
+    } catch (e) {
+        console.error("Error fetching transaction details:", e);
+        res.status(500).json({
+            error: true,
+            message: e.message || "Failed to fetch transaction details"
         });
     }
 });
