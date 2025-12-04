@@ -583,18 +583,19 @@ export async function updateTillForDeposit(userId, denomination) {
         const count = denomination[field] || 0;
         if (count > 0) {
             // Update DENOMCOUNT and INFLOW
+            // Note: Oracle requires each bind position to have a parameter, even if same value
             updates.push({
                 query: `UPDATE FCUBSPRD.fbtb_till_detail_ccy
-                        SET DENOMCOUNT = DENOMCOUNT + :1, INFLOW = INFLOW + :1
+                        SET DENOMCOUNT = DENOMCOUNT + :1, INFLOW = INFLOW + :2
                         WHERE denomcode = (
                             SELECT denomcode FROM FCUBSPRD.fbtb_till_detail_ccy
-                            WHERE till_id = (SELECT TILL_ID FROM FCUBSPRD.smtb_user_tills WHERE user_id = UPPER(:2))
-                            AND denomval = :3 AND ccycode = 'ETB'
+                            WHERE till_id = (SELECT TILL_ID FROM FCUBSPRD.smtb_user_tills WHERE user_id = UPPER(:3))
+                            AND denomval = :4 AND ccycode = 'ETB'
                             ORDER BY denomcode ASC FETCH FIRST 1 ROWS ONLY
                         )
-                        AND till_id = (SELECT TILL_ID FROM FCUBSPRD.smtb_user_tills WHERE user_id = UPPER(:2))
+                        AND till_id = (SELECT TILL_ID FROM FCUBSPRD.smtb_user_tills WHERE user_id = UPPER(:5))
                         AND ccycode = 'ETB'`,
-                params: [count, userId, value]
+                params: [count, count, userId, value, userId]
             });
         }
     }
@@ -652,18 +653,19 @@ export async function updateTillForWithdraw(userId, denomination) {
         const count = denomination[field] || 0;
         if (count > 0) {
             // Update DENOMCOUNT (decrease) and OUTFLOW (increase)
+            // Note: Oracle requires each bind position to have a parameter, even if same value
             updates.push({
                 query: `UPDATE FCUBSPRD.fbtb_till_detail_ccy
-                        SET DENOMCOUNT = DENOMCOUNT - :1, OUTFLOW = OUTFLOW + :1
+                        SET DENOMCOUNT = DENOMCOUNT - :1, OUTFLOW = OUTFLOW + :2
                         WHERE denomcode = (
                             SELECT denomcode FROM FCUBSPRD.fbtb_till_detail_ccy
-                            WHERE till_id = (SELECT TILL_ID FROM FCUBSPRD.smtb_user_tills WHERE user_id = UPPER(:2))
-                            AND denomval = :3 AND ccycode = 'ETB'
+                            WHERE till_id = (SELECT TILL_ID FROM FCUBSPRD.smtb_user_tills WHERE user_id = UPPER(:3))
+                            AND denomval = :4 AND ccycode = 'ETB'
                             ORDER BY denomcode ASC FETCH FIRST 1 ROWS ONLY
                         )
-                        AND till_id = (SELECT TILL_ID FROM FCUBSPRD.smtb_user_tills WHERE user_id = UPPER(:2))
+                        AND till_id = (SELECT TILL_ID FROM FCUBSPRD.smtb_user_tills WHERE user_id = UPPER(:5))
                         AND ccycode = 'ETB'`,
-                params: [count, userId, value]
+                params: [count, count, userId, value, userId]
             });
         }
     }
