@@ -444,9 +444,13 @@ export async function executeFlexcubeTransaction(soapMessage, endpoint = null) {
     const flexcubeEndpoint = endpoint || process.env.FLEXCUBE_RT_SERVICE_URL ||
         'http://10.1.245.18:7003/FCUBSRTService/FCUBSRTService';
 
+    // Timeout in milliseconds (30 seconds)
+    const TIMEOUT_MS = 30000;
+
     debugLog('SOAP_EXECUTE_START', 'Starting SOAP transaction', {
         endpoint: flexcubeEndpoint,
-        messageLength: soapMessage.length
+        messageLength: soapMessage.length,
+        timeout: TIMEOUT_MS
     });
 
     // Log the SOAP request (truncated for readability)
@@ -461,14 +465,21 @@ export async function executeFlexcubeTransaction(soapMessage, endpoint = null) {
     try {
         const startTime = Date.now();
 
+        // Create AbortController for timeout
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
         const response = await fetch(flexcubeEndpoint, {
             method: 'POST',
             headers: {
                 'Content-Type': 'text/xml;charset=UTF-8',
                 'SOAPAction': '"CreateTransaction"'
             },
-            body: soapMessage
+            body: soapMessage,
+            signal: controller.signal
         });
+
+        clearTimeout(timeoutId);
 
         const responseText = await response.text();
         const duration = Date.now() - startTime;
@@ -520,17 +531,69 @@ export async function executeFlexcubeTransaction(soapMessage, endpoint = null) {
 
         return result;
     } catch (error) {
+        // Extract detailed error information
+        let errorDetails = error.message;
+        let errorCode = 'UNKNOWN';
+
+        // Check for specific error types
+        if (error.name === 'AbortError') {
+            errorDetails = `Connection timeout after ${TIMEOUT_MS}ms - Flexcube server not responding`;
+            errorCode = 'TIMEOUT';
+        } else if (error.cause) {
+            // Node.js fetch wraps the actual error in 'cause'
+            const cause = error.cause;
+            errorCode = cause.code || cause.errno || 'NETWORK_ERROR';
+
+            if (cause.code === 'ECONNREFUSED') {
+                errorDetails = `Connection refused - Flexcube server at ${flexcubeEndpoint} is not accepting connections. Check if the server is running and the port is correct.`;
+            } else if (cause.code === 'ENOTFOUND') {
+                errorDetails = `DNS lookup failed - Cannot resolve hostname. Check if the endpoint URL is correct: ${flexcubeEndpoint}`;
+            } else if (cause.code === 'ETIMEDOUT') {
+                errorDetails = `Connection timed out - Cannot reach Flexcube server at ${flexcubeEndpoint}. Check network connectivity and firewall rules.`;
+            } else if (cause.code === 'ECONNRESET') {
+                errorDetails = `Connection reset by Flexcube server. The server closed the connection unexpectedly.`;
+            } else if (cause.code === 'EHOSTUNREACH') {
+                errorDetails = `Host unreachable - Cannot reach ${flexcubeEndpoint}. Check network routing and firewall.`;
+            } else {
+                errorDetails = `Network error: ${cause.message || cause.code || error.message}`;
+            }
+        }
+
         console.error('\n' + '='.repeat(80));
         console.error('[SOAP ERROR]');
-        console.error('Error:', error.message);
+        console.error('Error Code:', errorCode);
+        console.error('Error Details:', errorDetails);
+        console.error('Original Error:', error.message);
+        if (error.cause) {
+            console.error('Cause:', JSON.stringify({
+                code: error.cause.code,
+                errno: error.cause.errno,
+                syscall: error.cause.syscall,
+                address: error.cause.address,
+                port: error.cause.port,
+                message: error.cause.message
+            }, null, 2));
+        }
         console.error('Stack:', error.stack);
+        console.error('='.repeat(80));
+        console.error('\n[TROUBLESHOOTING]');
+        console.error('1. Verify Flexcube server is running at:', flexcubeEndpoint);
+        console.error('2. Check if you can ping the IP: ping 10.1.245.18');
+        console.error('3. Check if port 7003 is open: telnet 10.1.245.18 7003');
+        console.error('4. Verify firewall rules allow outbound connections to this endpoint');
+        console.error('5. If using VPN, ensure VPN is connected');
         console.error('='.repeat(80) + '\n');
 
-        debugLog('SOAP_EXECUTE_ERROR', 'SOAP transaction exception', { error: error.message });
+        debugLog('SOAP_EXECUTE_ERROR', 'SOAP transaction exception', {
+            error: errorDetails,
+            errorCode,
+            originalError: error.message
+        });
 
         return {
             success: false,
-            error: error.message,
+            error: errorDetails,
+            errorCode,
             rawResponse: null
         };
     }
@@ -538,6 +601,7 @@ export async function executeFlexcubeTransaction(soapMessage, endpoint = null) {
 
 /**
  * Create Deposit transaction (Credit customer account, Debit GL)
+ * For deposit: GL is debited (cash received), Customer account is credited
  */
 export async function createDepositTransaction(params) {
     const {
@@ -545,26 +609,52 @@ export async function createDepositTransaction(params) {
         amount,
         tellerBranch,
         glAccount = '1031110049409011', // Default GL account for cash
-        denomination
+        xref,
+        userId = 'ABORANAT'
     } = params;
 
     const customerBranch = extractBranchFromAccount(customerAccount);
 
+    debugLog('DEPOSIT_TXN_START', 'Creating Deposit SOAP Transaction', {
+        customerAccount,
+        amount,
+        tellerBranch,
+        customerBranch,
+        glAccount,
+        xref,
+        userId
+    });
+
     const soapParams = {
-        product: 'ETAL',
+        product: 'CSDP',              // Cash Deposit product
         branch: customerBranch,
-        txnBranch: tellerBranch,
-        txnAccount: glAccount,           // Debit GL account
+        txnBranch: tellerBranch || customerBranch,
+        txnAccount: glAccount,        // Debit GL account (cash in)
+        txnCurrency: 'ETB',
         txnAmount: amount,
-        txnCode: 'FTT',
+        txnCode: 'CDP',               // Cash Deposit code
         offsetBranch: customerBranch,
-        offsetAccount: customerAccount,  // Credit customer account
+        offsetAccount: customerAccount, // Credit customer account
+        offsetCurrency: 'ETB',
         offsetAmount: amount,
-        offsetCode: 'FTT'
+        offsetCode: 'CDP',
+        userId: userId,
+        source: 'ABORANAT',
+        xref: xref
     };
 
+    debugLog('DEPOSIT_TXN_PARAMS', 'SOAP Parameters', soapParams);
+
     const soapMessage = buildCreateTransactionSOAP(soapParams);
-    return await executeFlexcubeTransaction(soapMessage);
+    const result = await executeFlexcubeTransaction(soapMessage);
+
+    debugLog('DEPOSIT_TXN_RESULT', 'Deposit Transaction Result', {
+        success: result.success,
+        trnRefNo: result.trnRefNo,
+        error: result.error
+    });
+
+    return result;
 }
 
 /**
@@ -627,34 +717,66 @@ export async function createWithdrawTransaction(params) {
 
 /**
  * Create Transfer transaction (Debit customer account, Credit beneficiary account)
- * No till update needed for transfers
+ * No till update needed for transfers (no cash involved)
+ * No limit check needed (transfer between accounts)
+ * No denomination needed (no cash involved)
  */
 export async function createTransferTransaction(params) {
     const {
         fromAccount,
         toAccount,
         amount,
-        tellerBranch
+        tellerBranch,
+        xref,
+        userId = 'ABORANAT',
+        narration = ''
     } = params;
 
     const fromBranch = extractBranchFromAccount(fromAccount);
     const toBranch = extractBranchFromAccount(toAccount);
 
+    debugLog('TRANSFER_TXN_START', 'Creating Transfer SOAP Transaction', {
+        fromAccount,
+        toAccount,
+        amount,
+        tellerBranch,
+        fromBranch,
+        toBranch,
+        xref,
+        userId,
+        narration
+    });
+
     const soapParams = {
-        product: 'ETAL',
+        product: 'ETAL',              // Electronic Transfer product
         branch: fromBranch,
-        txnBranch: tellerBranch,
-        txnAccount: fromAccount,         // Debit source account
+        txnBranch: tellerBranch || fromBranch,
+        txnAccount: fromAccount,      // Debit source account
+        txnCurrency: 'ETB',
         txnAmount: amount,
-        txnCode: 'FTT',
+        txnCode: 'FTT',               // Fund Transfer code
         offsetBranch: toBranch,
-        offsetAccount: toAccount,        // Credit destination account
+        offsetAccount: toAccount,     // Credit destination account
+        offsetCurrency: 'ETB',
         offsetAmount: amount,
-        offsetCode: 'FTT'
+        offsetCode: 'FTT',
+        userId: userId,
+        source: 'ABORANAT',
+        xref: xref
     };
 
+    debugLog('TRANSFER_TXN_PARAMS', 'SOAP Parameters', soapParams);
+
     const soapMessage = buildCreateTransactionSOAP(soapParams);
-    return await executeFlexcubeTransaction(soapMessage);
+    const result = await executeFlexcubeTransaction(soapMessage);
+
+    debugLog('TRANSFER_TXN_RESULT', 'Transfer Transaction Result', {
+        success: result.success,
+        trnRefNo: result.trnRefNo,
+        error: result.error
+    });
+
+    return result;
 }
 
 // ============================================

@@ -5174,9 +5174,6 @@ router.post("/process-deposit-with-denomination", auth, async (req, res) => {
             finalDenomination = FlexcubeTransactionService.autopopulateDenomination(amount);
         }
 
-        // Check maker-checker threshold
-        const checkerCheck = await FlexcubeTransactionService.checkMakerCheckerThreshold(amount);
-
         // Generate XREF if not exists
         if (!deposit.xref) {
             deposit.xref = await Deposit.generateXref();
@@ -5185,47 +5182,113 @@ router.post("/process-deposit-with-denomination", auth, async (req, res) => {
         // Update deposit with denomination info
         deposit.denomination = finalDenomination;
         deposit.denomination_total = FlexcubeTransactionService.calculateDenominationTotal(finalDenomination);
-        deposit.needs_checker = checkerCheck.needsChecker;
-        deposit.checker_threshold = checkerCheck.threshold;
 
-        if (checkerCheck.needsChecker) {
-            // Needs checker approval - set to pending_checker
-            deposit.status = 'pending_checker';
-            deposit.posted_by = posted_by || req.user?.name;
-            deposit.posted_date = new Date();
+        // Process directly - No limit check, No maker-checker for deposits
+        console.log('\n' + '='.repeat(80));
+        console.log('[DEPOSIT_ROUTE] Processing deposit');
+        console.log('='.repeat(80));
+        console.log('Deposit ID:', deposit_id);
+        console.log('Account:', deposit.account_number);
+        console.log('Amount:', amount);
+        console.log('Branch:', deposit.branch);
+        console.log('XREF:', deposit.xref);
+        console.log('Posted By:', posted_by || req.user?.name);
+        console.log('Denomination:', JSON.stringify(finalDenomination, null, 2));
+        console.log('='.repeat(80) + '\n');
+
+        // ============================================
+        // STEP 1: Execute SOAP Transaction to Flexcube
+        // ============================================
+        console.log('[DEPOSIT_ROUTE] STEP 1: Executing SOAP Transaction to Flexcube...');
+
+        const soapResult = await FlexcubeTransactionService.createDepositTransaction({
+            customerAccount: deposit.account_number,
+            amount: amount,
+            tellerBranch: deposit.branch || FlexcubeTransactionService.extractBranchFromAccount(deposit.account_number),
+            glAccount: '1031110049409011', // GL account for cash
+            xref: deposit.xref,
+            userId: posted_by || req.user?.name || 'ABORANAT'
+        });
+
+        console.log('\n[DEPOSIT_ROUTE] SOAP Result:', JSON.stringify({
+            success: soapResult.success,
+            trnRefNo: soapResult.trnRefNo,
+            error: soapResult.error,
+            httpStatus: soapResult.httpStatus
+        }, null, 2));
+
+        // Check if SOAP transaction succeeded
+        if (!soapResult.success) {
+            console.error('[DEPOSIT_ROUTE] SOAP Transaction FAILED!');
+            console.error('Error:', soapResult.error);
+
+            // Save the failed response but don't mark as posted
+            deposit.flexcube_response = {
+                success: false,
+                error: soapResult.error,
+                rawResponse: soapResult.rawResponse?.substring(0, 1000), // Truncate for storage
+                timestamp: new Date()
+            };
+            deposit.status = 'assigned'; // Keep as assigned so teller can retry
             await deposit.save();
 
-            return res.status(200).json({
-                error: false,
-                message: `Transaction requires checker approval (amount ${amount} >= threshold ${checkerCheck.threshold})`,
+            return res.status(400).json({
+                error: true,
+                message: `Flexcube transaction failed: ${soapResult.error}`,
                 data: {
-                    deposit,
-                    needsChecker: true,
-                    status: 'pending_checker'
+                    soapError: soapResult.error,
+                    deposit
                 }
             });
         }
 
-        // No checker needed - process directly
+        console.log('[DEPOSIT_ROUTE] SOAP Transaction SUCCESS!');
+        console.log('Flexcube TRN Ref:', soapResult.trnRefNo);
+
+        // ============================================
+        // STEP 2: Update deposit record with success
+        // ============================================
         deposit.status = 'posted';
         deposit.posted_by = posted_by || req.user?.name;
         deposit.posted_date = new Date();
-        deposit.trn_ref_no = trn_ref_no || `TRN${Date.now()}`;
+        deposit.trn_ref_no = soapResult.trnRefNo || trn_ref_no || `TRN${Date.now()}`;
+        deposit.flexcube_response = {
+            success: true,
+            trnRefNo: soapResult.trnRefNo,
+            timestamp: new Date()
+        };
 
-        // Update till (add to teller's till for deposit)
+        // ============================================
+        // STEP 3: Update Till (add to teller's till)
+        // ============================================
+        console.log('\n[DEPOSIT_ROUTE] STEP 2: Starting Till Update for user:', posted_by || req.user?.userId);
         try {
-            await FlexcubeTransactionService.updateTillForDeposit(
+            const tillResult = await FlexcubeTransactionService.updateTillForDeposit(
                 posted_by || req.user?.userId,
                 finalDenomination
             );
-            deposit.till_updated = true;
+            console.log('[DEPOSIT_ROUTE] Till Update Result:', JSON.stringify(tillResult, null, 2));
+            deposit.till_updated = tillResult.success;
             deposit.till_update_date = new Date();
         } catch (tillError) {
-            console.error("Till update failed:", tillError);
+            console.error("[DEPOSIT_ROUTE] Till update EXCEPTION:", tillError);
+            // Continue even if till update fails - the Flexcube transaction already succeeded
             deposit.till_updated = false;
         }
 
+        // ============================================
+        // STEP 4: Save and return success
+        // ============================================
+        console.log('[DEPOSIT_ROUTE] STEP 3: Saving deposit document...');
         await deposit.save();
+        console.log('[DEPOSIT_ROUTE] Deposit saved successfully');
+
+        console.log('\n' + '='.repeat(80));
+        console.log('[DEPOSIT_ROUTE] DEPOSIT COMPLETE - SUCCESS');
+        console.log('Status:', deposit.status);
+        console.log('Flexcube TRN Ref:', deposit.trn_ref_no);
+        console.log('Till Updated:', deposit.till_updated);
+        console.log('='.repeat(80) + '\n');
 
         res.status(200).json({
             error: false,
@@ -5233,7 +5296,8 @@ router.post("/process-deposit-with-denomination", auth, async (req, res) => {
             data: {
                 deposit,
                 needsChecker: false,
-                status: 'posted'
+                status: 'posted',
+                flexcubeTrnRef: soapResult.trnRefNo
             }
         });
 
@@ -5242,6 +5306,170 @@ router.post("/process-deposit-with-denomination", auth, async (req, res) => {
         res.status(500).json({
             error: true,
             message: e.message || "Failed to process deposit"
+        });
+    }
+});
+
+/**
+ * Process transfer transaction (Teller posting)
+ * Transfer: Debit source account, Credit beneficiary account
+ * No till update needed (no cash involved)
+ * No limit check needed (account to account transfer)
+ * No denomination needed (no cash involved)
+ * Only SOAP transaction to Flexcube
+ */
+router.post("/process-transfer", auth, async (req, res) => {
+    try {
+        const {
+            transfer_id,
+            trn_ref_no,
+            posted_by,
+            remarks
+        } = req.body;
+
+        if (!transfer_id) {
+            return res.status(400).json({
+                error: true,
+                message: "Transfer ID is required"
+            });
+        }
+
+        // Find the transfer request
+        const transfer = await Transfer.findById(transfer_id);
+        if (!transfer) {
+            return res.status(404).json({
+                error: true,
+                message: "Transfer request not found"
+            });
+        }
+
+        // Validate status
+        if (!['assigned', 'assigned_by_csr'].includes(transfer.status)) {
+            return res.status(400).json({
+                error: true,
+                message: `Cannot process transfer with status: ${transfer.status}`
+            });
+        }
+
+        const amount = parseFloat(transfer.amount_in_figures);
+
+        // Generate XREF if not exists
+        if (!transfer.xref) {
+            transfer.xref = await Transfer.generateXref();
+        }
+
+        // Process directly via SOAP - No limit check, No maker-checker for transfers
+        console.log('\n' + '='.repeat(80));
+        console.log('[TRANSFER_ROUTE] Processing transfer');
+        console.log('='.repeat(80));
+        console.log('Transfer ID:', transfer_id);
+        console.log('From Account:', transfer.account_number);
+        console.log('To Account:', transfer.beneficiary_account_number);
+        console.log('Beneficiary Name:', transfer.beneficiary_name);
+        console.log('Amount:', amount);
+        console.log('Branch:', transfer.branch);
+        console.log('XREF:', transfer.xref);
+        console.log('Posted By:', posted_by || req.user?.name);
+        console.log('Narration:', transfer.payment_narration);
+        console.log('='.repeat(80) + '\n');
+
+        // ============================================
+        // STEP 1: Execute SOAP Transaction to Flexcube
+        // ============================================
+        console.log('[TRANSFER_ROUTE] STEP 1: Executing SOAP Transaction to Flexcube...');
+
+        const soapResult = await FlexcubeTransactionService.createTransferTransaction({
+            fromAccount: transfer.account_number,
+            toAccount: transfer.beneficiary_account_number,
+            amount: amount,
+            tellerBranch: transfer.branch || FlexcubeTransactionService.extractBranchFromAccount(transfer.account_number),
+            xref: transfer.xref,
+            userId: posted_by || req.user?.name || 'ABORANAT',
+            narration: transfer.payment_narration
+        });
+
+        console.log('\n[TRANSFER_ROUTE] SOAP Result:', JSON.stringify({
+            success: soapResult.success,
+            trnRefNo: soapResult.trnRefNo,
+            error: soapResult.error,
+            httpStatus: soapResult.httpStatus
+        }, null, 2));
+
+        // Check if SOAP transaction succeeded
+        if (!soapResult.success) {
+            console.error('[TRANSFER_ROUTE] SOAP Transaction FAILED!');
+            console.error('Error:', soapResult.error);
+
+            // Save the failed response but don't mark as posted
+            transfer.flexcube_response = {
+                success: false,
+                error: soapResult.error,
+                rawResponse: soapResult.rawResponse?.substring(0, 1000), // Truncate for storage
+                timestamp: new Date()
+            };
+            transfer.status = 'assigned'; // Keep as assigned so teller can retry
+            await transfer.save();
+
+            return res.status(400).json({
+                error: true,
+                message: `Flexcube transaction failed: ${soapResult.error}`,
+                data: {
+                    soapError: soapResult.error,
+                    transfer
+                }
+            });
+        }
+
+        console.log('[TRANSFER_ROUTE] SOAP Transaction SUCCESS!');
+        console.log('Flexcube TRN Ref:', soapResult.trnRefNo);
+
+        // ============================================
+        // STEP 2: Update transfer record with success
+        // ============================================
+        transfer.status = 'posted';
+        transfer.posted_by = posted_by || req.user?.name;
+        transfer.posted_date = new Date();
+        transfer.trn_ref_no = soapResult.trnRefNo || trn_ref_no || `TRN${Date.now()}`;
+        transfer.flexcube_response = {
+            success: true,
+            trnRefNo: soapResult.trnRefNo,
+            timestamp: new Date()
+        };
+
+        // Note: No till update for transfers (no cash involved)
+
+        // ============================================
+        // STEP 3: Save and return success
+        // ============================================
+        console.log('[TRANSFER_ROUTE] STEP 2: Saving transfer document...');
+        await transfer.save();
+        console.log('[TRANSFER_ROUTE] Transfer saved successfully');
+
+        console.log('\n' + '='.repeat(80));
+        console.log('[TRANSFER_ROUTE] TRANSFER COMPLETE - SUCCESS');
+        console.log('Status:', transfer.status);
+        console.log('Flexcube TRN Ref:', transfer.trn_ref_no);
+        console.log('From:', transfer.account_number);
+        console.log('To:', transfer.beneficiary_account_number);
+        console.log('Amount:', amount);
+        console.log('='.repeat(80) + '\n');
+
+        res.status(200).json({
+            error: false,
+            message: "Transfer processed successfully",
+            data: {
+                transfer,
+                needsChecker: false,
+                status: 'posted',
+                flexcubeTrnRef: soapResult.trnRefNo
+            }
+        });
+
+    } catch (e) {
+        console.error("Error in process transfer:", e);
+        res.status(500).json({
+            error: true,
+            message: e.message || "Failed to process transfer"
         });
     }
 });
