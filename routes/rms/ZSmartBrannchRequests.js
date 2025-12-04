@@ -4993,27 +4993,111 @@ router.post("/process-withdraw-with-denomination", auth, async (req, res) => {
         }
 
         // No checker needed - process directly
-        // For now, just update status to posted (SOAP integration can be enabled later)
+        console.log('\n' + '='.repeat(80));
+        console.log('[WITHDRAW_ROUTE] Processing withdrawal - NO CHECKER NEEDED');
+        console.log('='.repeat(80));
+        console.log('Withdraw ID:', withdraw_id);
+        console.log('Account:', withdraw.account_number);
+        console.log('Amount:', amount);
+        console.log('Branch:', withdraw.branch);
+        console.log('XREF:', withdraw.xref);
+        console.log('Posted By:', posted_by || req.user?.name);
+        console.log('Denomination:', JSON.stringify(finalDenomination, null, 2));
+        console.log('='.repeat(80) + '\n');
+
+        // ============================================
+        // STEP 1: Execute SOAP Transaction to Flexcube
+        // ============================================
+        console.log('[WITHDRAW_ROUTE] STEP 1: Executing SOAP Transaction to Flexcube...');
+
+        const soapResult = await FlexcubeTransactionService.createWithdrawTransaction({
+            customerAccount: withdraw.account_number,
+            amount: amount,
+            tellerBranch: withdraw.branch || FlexcubeTransactionService.extractBranchFromAccount(withdraw.account_number),
+            glAccount: '1031110049409011', // GL account for cash
+            xref: withdraw.xref,
+            userId: posted_by || req.user?.name || 'ABORANAT'
+        });
+
+        console.log('\n[WITHDRAW_ROUTE] SOAP Result:', JSON.stringify({
+            success: soapResult.success,
+            trnRefNo: soapResult.trnRefNo,
+            error: soapResult.error,
+            httpStatus: soapResult.httpStatus
+        }, null, 2));
+
+        // Check if SOAP transaction succeeded
+        if (!soapResult.success) {
+            console.error('[WITHDRAW_ROUTE] SOAP Transaction FAILED!');
+            console.error('Error:', soapResult.error);
+
+            // Save the failed response but don't mark as posted
+            withdraw.flexcube_response = {
+                success: false,
+                error: soapResult.error,
+                rawResponse: soapResult.rawResponse?.substring(0, 1000), // Truncate for storage
+                timestamp: new Date()
+            };
+            withdraw.status = 'assigned'; // Keep as assigned so teller can retry
+            await withdraw.save();
+
+            return res.status(400).json({
+                error: true,
+                message: `Flexcube transaction failed: ${soapResult.error}`,
+                data: {
+                    soapError: soapResult.error,
+                    withdraw
+                }
+            });
+        }
+
+        console.log('[WITHDRAW_ROUTE] SOAP Transaction SUCCESS!');
+        console.log('Flexcube TRN Ref:', soapResult.trnRefNo);
+
+        // ============================================
+        // STEP 2: Update withdraw record with success
+        // ============================================
         withdraw.status = 'posted';
         withdraw.posted_by = posted_by || req.user?.name;
         withdraw.posted_date = new Date();
-        withdraw.trn_ref_no = trn_ref_no || `TRN${Date.now()}`;
+        withdraw.trn_ref_no = soapResult.trnRefNo || trn_ref_no || `TRN${Date.now()}`;
+        withdraw.flexcube_response = {
+            success: true,
+            trnRefNo: soapResult.trnRefNo,
+            timestamp: new Date()
+        };
 
-        // Update till (deduct from teller's till for withdrawal)
+        // ============================================
+        // STEP 3: Update Till (deduct from teller's till)
+        // ============================================
+        console.log('\n[WITHDRAW_ROUTE] STEP 2: Starting Till Update for user:', posted_by || req.user?.userId);
         try {
-            await FlexcubeTransactionService.updateTillForWithdraw(
+            const tillResult = await FlexcubeTransactionService.updateTillForWithdraw(
                 posted_by || req.user?.userId,
                 finalDenomination
             );
-            withdraw.till_updated = true;
+            console.log('[WITHDRAW_ROUTE] Till Update Result:', JSON.stringify(tillResult, null, 2));
+            withdraw.till_updated = tillResult.success;
             withdraw.till_update_date = new Date();
         } catch (tillError) {
-            console.error("Till update failed:", tillError);
-            // Continue even if till update fails - log the error
+            console.error("[WITHDRAW_ROUTE] Till update EXCEPTION:", tillError);
+            // Continue even if till update fails - the Flexcube transaction already succeeded
             withdraw.till_updated = false;
         }
 
+        // ============================================
+        // STEP 4: Save and return success
+        // ============================================
+        console.log('[WITHDRAW_ROUTE] STEP 3: Saving withdraw document...');
         await withdraw.save();
+        console.log('[WITHDRAW_ROUTE] Withdraw saved successfully');
+
+        console.log('\n' + '='.repeat(80));
+        console.log('[WITHDRAW_ROUTE] WITHDRAWAL COMPLETE - SUCCESS');
+        console.log('Status:', withdraw.status);
+        console.log('Flexcube TRN Ref:', withdraw.trn_ref_no);
+        console.log('Till Updated:', withdraw.till_updated);
+        console.log('='.repeat(80) + '\n');
 
         res.status(200).json({
             error: false,
@@ -5021,7 +5105,8 @@ router.post("/process-withdraw-with-denomination", auth, async (req, res) => {
             data: {
                 withdraw,
                 needsChecker: false,
-                status: 'posted'
+                status: 'posted',
+                flexcubeTrnRef: soapResult.trnRefNo
             }
         });
 

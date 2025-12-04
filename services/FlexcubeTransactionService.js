@@ -14,6 +14,25 @@ import MakerCheckerThreshold from '../models/rms/MakerCheckerThreshold.js';
 import XrefCounter from '../models/rms/XrefCounter.js';
 
 // ============================================
+// DEBUG LOGGING UTILITY
+// ============================================
+const DEBUG = true; // Set to false to disable debug logging
+
+function debugLog(section, message, data = null) {
+    if (!DEBUG) return;
+    const timestamp = new Date().toISOString();
+    console.log('\n' + '='.repeat(60));
+    console.log(`[${timestamp}] [FlexcubeService] [${section}]`);
+    console.log('-'.repeat(60));
+    console.log(message);
+    if (data !== null) {
+        console.log('-'.repeat(60));
+        console.log('Data:', typeof data === 'object' ? JSON.stringify(data, null, 2) : data);
+    }
+    console.log('='.repeat(60) + '\n');
+}
+
+// ============================================
 // UTILITY FUNCTIONS
 // ============================================
 
@@ -357,7 +376,7 @@ export async function checkMakerCheckerThreshold(amount, currency = 'ETB') {
  */
 export function buildCreateTransactionSOAP(params) {
     const {
-        product = 'ETAL',         // Product code
+        product = 'ETAL',         // Product code (CSWL for withdrawal, CSDP for deposit)
         branch,                    // Transaction branch
         txnBranch,                // Teller branch
         txnAccount,               // Transaction account (customer account)
@@ -369,11 +388,17 @@ export function buildCreateTransactionSOAP(params) {
         offsetCurrency = 'ETB',
         offsetAmount,
         offsetCode = 'FTT',       // Offset transaction code
-        userId = 'IB_SER',
-        source = 'EXTIB'
+        userId = 'ABORANAT',
+        source = 'ABORANAT',
+        xref = ''                 // External reference (16-digit)
     } = params;
 
-    return `<?xml version="1.0" encoding="UTF-8"?>
+    debugLog('SOAP_BUILD', 'Building SOAP message', {
+        product, branch, txnBranch, txnAccount, txnAmount, txnCode,
+        offsetBranch, offsetAccount, offsetAmount, offsetCode, userId, xref
+    });
+
+    const soapMessage = `<?xml version="1.0" encoding="UTF-8"?>
 <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:fcub="http://fcubs.ofss.com/service/FCUBSRTService">
     <soapenv:Header/>
     <soapenv:Body>
@@ -400,11 +425,14 @@ export function buildCreateTransactionSOAP(params) {
                     <fcub:OFFSETCCY>${offsetCurrency}</fcub:OFFSETCCY>
                     <fcub:OFFSETAMT>${offsetAmount || txnAmount}</fcub:OFFSETAMT>
                     <fcub:OFFSETTRN>${offsetCode}</fcub:OFFSETTRN>
+                    ${xref ? `<fcub:XREF>${xref}</fcub:XREF>` : ''}
                 </fcub:Transaction-Details>
             </fcub:FCUBS_BODY>
         </fcub:CREATETRANSACTION_FSFS_REQ>
     </soapenv:Body>
 </soapenv:Envelope>`;
+
+    return soapMessage;
 }
 
 /**
@@ -414,11 +442,25 @@ export function buildCreateTransactionSOAP(params) {
 export async function executeFlexcubeTransaction(soapMessage, endpoint = null) {
     // Default endpoint - should be configured in environment
     const flexcubeEndpoint = endpoint || process.env.FLEXCUBE_RT_SERVICE_URL ||
-        'http://10.1.2.138:7004/soa-infra/services/default/FCUBSRTService/fcubsrtserviceprocess_client_ep?WSDL';
+        'http://10.1.245.18:7003/FCUBSRTService/FCUBSRTService';
+
+    debugLog('SOAP_EXECUTE_START', 'Starting SOAP transaction', {
+        endpoint: flexcubeEndpoint,
+        messageLength: soapMessage.length
+    });
+
+    // Log the SOAP request (truncated for readability)
+    console.log('\n' + '='.repeat(80));
+    console.log('[SOAP REQUEST]');
+    console.log('Endpoint:', flexcubeEndpoint);
+    console.log('-'.repeat(80));
+    console.log('Request Body:');
+    console.log(soapMessage);
+    console.log('='.repeat(80) + '\n');
 
     try {
-        // In a real implementation, this would use a SOAP client like 'soap' npm package
-        // For now, we'll use fetch with raw XML
+        const startTime = Date.now();
+
         const response = await fetch(flexcubeEndpoint, {
             method: 'POST',
             headers: {
@@ -429,26 +471,63 @@ export async function executeFlexcubeTransaction(soapMessage, endpoint = null) {
         });
 
         const responseText = await response.text();
+        const duration = Date.now() - startTime;
+
+        console.log('\n' + '='.repeat(80));
+        console.log('[SOAP RESPONSE]');
+        console.log('Status:', response.status, response.statusText);
+        console.log('Duration:', duration, 'ms');
+        console.log('-'.repeat(80));
+        console.log('Response Body:');
+        console.log(responseText);
+        console.log('='.repeat(80) + '\n');
 
         // Parse response to check for success/failure
         const isSuccess = responseText.includes('<ns0:MSGSTAT>SUCCESS</ns0:MSGSTAT>') ||
-                          responseText.includes('MSGSTAT>SUCCESS<');
+                          responseText.includes('MSGSTAT>SUCCESS<') ||
+                          responseText.includes('<MSGSTAT>SUCCESS</MSGSTAT>');
 
         // Extract transaction reference if available
         let trnRefNo = null;
-        const trnRefMatch = responseText.match(/<ns0:TRN_REF_NO>([^<]+)<\/ns0:TRN_REF_NO>/);
+        const trnRefMatch = responseText.match(/<(?:ns0:)?FCCREF>([^<]+)<\/(?:ns0:)?FCCREF>/) ||
+                           responseText.match(/<(?:ns0:)?TRN_REF_NO>([^<]+)<\/(?:ns0:)?TRN_REF_NO>/) ||
+                           responseText.match(/<(?:ns0:)?XREF>([^<]+)<\/(?:ns0:)?XREF>/);
         if (trnRefMatch) {
             trnRefNo = trnRefMatch[1];
         }
 
-        return {
+        // Extract error message if failed
+        let errorMessage = null;
+        if (!isSuccess) {
+            const errorMatch = responseText.match(/<(?:ns0:)?EDESC>([^<]+)<\/(?:ns0:)?EDESC>/) ||
+                              responseText.match(/<(?:ns0:)?ERROR_DESC>([^<]+)<\/(?:ns0:)?ERROR_DESC>/) ||
+                              responseText.match(/<faultstring>([^<]+)<\/faultstring>/);
+            if (errorMatch) {
+                errorMessage = errorMatch[1];
+            }
+        }
+
+        const result = {
             success: isSuccess,
             trnRefNo,
             rawResponse: responseText,
-            error: isSuccess ? null : 'Transaction failed - check rawResponse for details'
+            httpStatus: response.status,
+            duration,
+            error: isSuccess ? null : (errorMessage || 'Transaction failed - check rawResponse for details')
         };
+
+        debugLog('SOAP_EXECUTE_COMPLETE', `SOAP transaction ${isSuccess ? 'SUCCESS' : 'FAILED'}`, result);
+
+        return result;
     } catch (error) {
-        console.error('SOAP transaction error:', error);
+        console.error('\n' + '='.repeat(80));
+        console.error('[SOAP ERROR]');
+        console.error('Error:', error.message);
+        console.error('Stack:', error.stack);
+        console.error('='.repeat(80) + '\n');
+
+        debugLog('SOAP_EXECUTE_ERROR', 'SOAP transaction exception', { error: error.message });
+
         return {
             success: false,
             error: error.message,
@@ -498,26 +577,52 @@ export async function createWithdrawTransaction(params) {
         amount,
         tellerBranch,
         glAccount = '1031110049409011', // Default GL account for cash
-        denomination
+        xref,
+        userId = 'ABORANAT'
     } = params;
 
     const customerBranch = extractBranchFromAccount(customerAccount);
 
+    debugLog('WITHDRAW_TXN_START', 'Creating Withdraw SOAP Transaction', {
+        customerAccount,
+        amount,
+        tellerBranch,
+        customerBranch,
+        glAccount,
+        xref,
+        userId
+    });
+
     const soapParams = {
-        product: 'ETAL',
+        product: 'CSWL',              // Cash Withdrawal product
         branch: customerBranch,
-        txnBranch: tellerBranch,
-        txnAccount: customerAccount,     // Debit customer account
+        txnBranch: tellerBranch || customerBranch,
+        txnAccount: customerAccount,  // Debit customer account
+        txnCurrency: 'ETB',
         txnAmount: amount,
-        txnCode: 'FTT',
-        offsetBranch: '103',             // GL branch (usually head office)
-        offsetAccount: glAccount,        // Credit GL account
+        txnCode: 'CWL',               // Cash Withdrawal code
+        offsetBranch: tellerBranch || customerBranch,
+        offsetAccount: glAccount,     // Credit GL account (teller's till)
+        offsetCurrency: 'ETB',
         offsetAmount: amount,
-        offsetCode: 'FTT'
+        offsetCode: 'CWL',
+        userId: userId,
+        source: 'ABORANAT',
+        xref: xref
     };
 
+    debugLog('WITHDRAW_TXN_PARAMS', 'SOAP Parameters', soapParams);
+
     const soapMessage = buildCreateTransactionSOAP(soapParams);
-    return await executeFlexcubeTransaction(soapMessage);
+    const result = await executeFlexcubeTransaction(soapMessage);
+
+    debugLog('WITHDRAW_TXN_RESULT', 'Withdraw Transaction Result', {
+        success: result.success,
+        trnRefNo: result.trnRefNo,
+        error: result.error
+    });
+
+    return result;
 }
 
 /**
@@ -562,7 +667,12 @@ export async function createTransferTransaction(params) {
  * @param {Object} denomination - Denomination breakdown
  */
 export async function updateTillForDeposit(userId, denomination) {
-    if (!denomination) return { success: true, message: 'No denomination to update' };
+    debugLog('TILL_DEPOSIT_START', 'Starting till update for DEPOSIT', { userId, denomination });
+
+    if (!denomination) {
+        debugLog('TILL_DEPOSIT', 'No denomination provided, skipping update');
+        return { success: true, message: 'No denomination to update' };
+    }
 
     const updates = [];
     const denomMap = [
@@ -582,6 +692,7 @@ export async function updateTillForDeposit(userId, denomination) {
     for (const { field, value } of denomMap) {
         const count = denomination[field] || 0;
         if (count > 0) {
+            debugLog('TILL_DEPOSIT_DENOM', `Adding denomination update: ${field} = ${count} x ${value}`, { field, count, value });
             // Update DENOMCOUNT and INFLOW
             // Note: Oracle requires each bind position to have a parameter, even if same value
             updates.push({
@@ -595,32 +706,55 @@ export async function updateTillForDeposit(userId, denomination) {
                         )
                         AND till_id = (SELECT TILL_ID FROM FCUBSPRD.smtb_user_tills WHERE user_id = UPPER(:5))
                         AND ccycode = 'ETB'`,
-                params: [count, count, userId, value, userId]
+                params: [count, count, userId, value, userId],
+                description: `Deposit denom update: ${field} (${value} ETB) x ${count}`
             });
         }
     }
 
     // Update till totals
     const totalAmount = calculateDenominationTotal(denomination);
+    debugLog('TILL_DEPOSIT_TOTAL', `Adding till totals update: INFLOW += ${totalAmount}`, { totalAmount, userId });
     updates.push({
         query: `UPDATE FCUBSPRD.fbtb_till_totals
                 SET INFLOW = INFLOW + :1
                 WHERE till_id = (SELECT TILL_ID FROM FCUBSPRD.smtb_user_tills WHERE user_id = UPPER(:2))
                 AND ccycode = 'ETB' AND POSTINGDATE = TO_DATE(CURRENT_DATE)`,
-        params: [totalAmount, userId]
+        params: [totalAmount, userId],
+        description: `Deposit totals update: INFLOW += ${totalAmount}`
     });
+
+    debugLog('TILL_DEPOSIT_QUERIES', `Total queries to execute: ${updates.length}`);
 
     try {
         // Execute all updates
-        for (const { query, params } of updates) {
+        let successCount = 0;
+        let failCount = 0;
+        for (let i = 0; i < updates.length; i++) {
+            const { query, params, description } = updates[i];
+            debugLog('TILL_DEPOSIT_EXEC', `Executing query ${i + 1}/${updates.length}: ${description}`, { params });
+
             const result = await executeQuery(query, params);
-            if (!result.success) {
-                console.error('Till update error:', result.error);
+
+            if (result.success) {
+                successCount++;
+                debugLog('TILL_DEPOSIT_RESULT', `Query ${i + 1} SUCCESS`, { rowsAffected: result.rowsAffected || 'unknown' });
+            } else {
+                failCount++;
+                debugLog('TILL_DEPOSIT_ERROR', `Query ${i + 1} FAILED`, { error: result.error });
             }
         }
-        return { success: true, message: 'Till updated successfully for deposit' };
+
+        const finalResult = {
+            success: failCount === 0,
+            message: `Till updated for deposit: ${successCount} success, ${failCount} failed`,
+            successCount,
+            failCount
+        };
+        debugLog('TILL_DEPOSIT_COMPLETE', 'Till deposit update completed', finalResult);
+        return finalResult;
     } catch (error) {
-        console.error('Till update error:', error);
+        debugLog('TILL_DEPOSIT_EXCEPTION', 'Exception during till deposit update', { error: error.message, stack: error.stack });
         return { success: false, error: error.message };
     }
 }
@@ -632,7 +766,12 @@ export async function updateTillForDeposit(userId, denomination) {
  * @param {Object} denomination - Denomination breakdown
  */
 export async function updateTillForWithdraw(userId, denomination) {
-    if (!denomination) return { success: true, message: 'No denomination to update' };
+    debugLog('TILL_WITHDRAW_START', 'Starting till update for WITHDRAW', { userId, denomination });
+
+    if (!denomination) {
+        debugLog('TILL_WITHDRAW', 'No denomination provided, skipping update');
+        return { success: true, message: 'No denomination to update' };
+    }
 
     const updates = [];
     const denomMap = [
@@ -652,6 +791,7 @@ export async function updateTillForWithdraw(userId, denomination) {
     for (const { field, value } of denomMap) {
         const count = denomination[field] || 0;
         if (count > 0) {
+            debugLog('TILL_WITHDRAW_DENOM', `Adding denomination update: ${field} = ${count} x ${value}`, { field, count, value });
             // Update DENOMCOUNT (decrease) and OUTFLOW (increase)
             // Note: Oracle requires each bind position to have a parameter, even if same value
             updates.push({
@@ -665,32 +805,55 @@ export async function updateTillForWithdraw(userId, denomination) {
                         )
                         AND till_id = (SELECT TILL_ID FROM FCUBSPRD.smtb_user_tills WHERE user_id = UPPER(:5))
                         AND ccycode = 'ETB'`,
-                params: [count, count, userId, value, userId]
+                params: [count, count, userId, value, userId],
+                description: `Withdraw denom update: ${field} (${value} ETB) x ${count}`
             });
         }
     }
 
     // Update till totals (outflow)
     const totalAmount = calculateDenominationTotal(denomination);
+    debugLog('TILL_WITHDRAW_TOTAL', `Adding till totals update: OUTFLOW += ${totalAmount}`, { totalAmount, userId });
     updates.push({
         query: `UPDATE FCUBSPRD.fbtb_till_totals
                 SET OUTFLOW = OUTFLOW + :1
                 WHERE till_id = (SELECT TILL_ID FROM FCUBSPRD.smtb_user_tills WHERE user_id = UPPER(:2))
                 AND ccycode = 'ETB' AND POSTINGDATE = TO_DATE(CURRENT_DATE)`,
-        params: [totalAmount, userId]
+        params: [totalAmount, userId],
+        description: `Withdraw totals update: OUTFLOW += ${totalAmount}`
     });
+
+    debugLog('TILL_WITHDRAW_QUERIES', `Total queries to execute: ${updates.length}`);
 
     try {
         // Execute all updates
-        for (const { query, params } of updates) {
+        let successCount = 0;
+        let failCount = 0;
+        for (let i = 0; i < updates.length; i++) {
+            const { query, params, description } = updates[i];
+            debugLog('TILL_WITHDRAW_EXEC', `Executing query ${i + 1}/${updates.length}: ${description}`, { params });
+
             const result = await executeQuery(query, params);
-            if (!result.success) {
-                console.error('Till update error:', result.error);
+
+            if (result.success) {
+                successCount++;
+                debugLog('TILL_WITHDRAW_RESULT', `Query ${i + 1} SUCCESS`, { rowsAffected: result.rowsAffected || 'unknown' });
+            } else {
+                failCount++;
+                debugLog('TILL_WITHDRAW_ERROR', `Query ${i + 1} FAILED`, { error: result.error });
             }
         }
-        return { success: true, message: 'Till updated successfully for withdraw' };
+
+        const finalResult = {
+            success: failCount === 0,
+            message: `Till updated for withdraw: ${successCount} success, ${failCount} failed`,
+            successCount,
+            failCount
+        };
+        debugLog('TILL_WITHDRAW_COMPLETE', 'Till withdraw update completed', finalResult);
+        return finalResult;
     } catch (error) {
-        console.error('Till update error:', error);
+        debugLog('TILL_WITHDRAW_EXCEPTION', 'Exception during till withdraw update', { error: error.message, stack: error.stack });
         return { success: false, error: error.message };
     }
 }
