@@ -5037,7 +5037,7 @@ router.post("/process-withdraw-with-denomination", auth, async (req, res) => {
             customerAccount: withdraw.account_number,
             amount: amount,
             tellerBranch: withdraw.branch || FlexcubeTransactionService.extractBranchFromAccount(withdraw.account_number),
-            glAccount: '1031110049409011', // GL account for cash
+            glAccount: '101101', // GL account for cash
             xref: withdraw.xref,
             narrative: `WITHDRAW-${withdraw.account_number}-BY-${posted_by || req.user?.name || 'TELLER'}`
         });
@@ -5228,7 +5228,7 @@ router.post("/process-deposit-with-denomination", auth, async (req, res) => {
             customerAccount: deposit.account_number,
             amount: amount,
             tellerBranch: deposit.branch || FlexcubeTransactionService.extractBranchFromAccount(deposit.account_number),
-            glAccount: '1031110049409011', // GL account for cash
+            glAccount: '101101', // GL account for cash
             xref: deposit.xref,
             narrative: `DEPOSIT-${deposit.account_number}-BY-${posted_by || req.user?.name || 'TELLER'}`
         });
@@ -5665,7 +5665,7 @@ router.post("/approve-pending-transaction", auth, async (req, res) => {
                 customerAccount: transaction.account_number,
                 amount: amount,
                 tellerBranch: transaction.branch || FlexcubeTransactionService.extractBranchFromAccount(transaction.account_number),
-                glAccount: '1031110049409011',
+                glAccount: '101101',
                 xref: transaction.xref,
                 narrative: `WITHDRAW-${transaction.account_number}-MAKER-${transaction.maker_name || transaction.posted_by}-CHECKER-${transaction.checker_name}`
             });
@@ -5675,7 +5675,7 @@ router.post("/approve-pending-transaction", auth, async (req, res) => {
                 customerAccount: transaction.account_number,
                 amount: amount,
                 tellerBranch: transaction.branch || FlexcubeTransactionService.extractBranchFromAccount(transaction.account_number),
-                glAccount: '1031110049409011',
+                glAccount: '101101',
                 xref: transaction.xref,
                 narrative: `DEPOSIT-${transaction.account_number}-MAKER-${transaction.maker_name || transaction.posted_by}-CHECKER-${transaction.checker_name}`
             });

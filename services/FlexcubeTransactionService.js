@@ -636,7 +636,7 @@ export async function createDepositTransaction(params) {
         customerAccount,
         amount,
         tellerBranch,
-        glAccount = '1031110049409011', // Default GL account for cash
+        glAccount = '101101', // Default GL account for cash
         xref,
         narrative = ''
     } = params;
@@ -653,7 +653,7 @@ export async function createDepositTransaction(params) {
     });
 
     const soapParams = {
-        product: 'CSDP',              // Cash Deposit product
+        product: 'SMBR',              // Cash Deposit product
         branch: customerBranch,
         txnBranch: tellerBranch || customerBranch,
         txnAccount: glAccount,        // Debit GL account (cash in)
@@ -663,7 +663,7 @@ export async function createDepositTransaction(params) {
         offsetAccount: customerAccount, // Credit customer account
         offsetCurrency: 'ETB',
         offsetAmount: amount,
-        userId: 'EXT_IBM',            // External integration user
+        userId: 'IB_SER',            // External integration user
         source: 'EXTIB',              // External integration source
         xref: xref,
         narrative: narrative || `DEPOSIT-${customerAccount}`
@@ -692,7 +692,7 @@ export async function createWithdrawTransaction(params) {
         customerAccount,
         amount,
         tellerBranch,
-        glAccount = '1031110049409011', // Default GL account for cash
+        glAccount = '101101', // Default GL account for cash
         xref,
         narrative = ''
     } = params;
@@ -709,7 +709,7 @@ export async function createWithdrawTransaction(params) {
     });
 
     const soapParams = {
-        product: 'CSWL',              // Cash Withdrawal product
+        product: 'SMBR',              // Cash Withdrawal product
         branch: customerBranch,
         txnBranch: tellerBranch || customerBranch,
         txnAccount: customerAccount,  // Debit customer account
@@ -719,7 +719,7 @@ export async function createWithdrawTransaction(params) {
         offsetAccount: glAccount,     // Credit GL account (teller's till)
         offsetCurrency: 'ETB',
         offsetAmount: amount,
-        userId: 'EXT_IBM',            // External integration user
+        userId: 'IB_SER',            // External integration user
         source: 'EXTIB',              // External integration source
         xref: xref,
         narrative: narrative || `WITHDRAW-${customerAccount}`
@@ -769,7 +769,7 @@ export async function createTransferTransaction(params) {
     });
 
     const soapParams = {
-        product: 'ETAL',              // Electronic Transfer product
+        product: 'SMBR',              // Electronic Transfer product
         branch: fromBranch,
         txnBranch: tellerBranch || fromBranch,
         txnAccount: fromAccount,      // Debit source account
@@ -779,7 +779,7 @@ export async function createTransferTransaction(params) {
         offsetAccount: toAccount,     // Credit destination account
         offsetCurrency: 'ETB',
         offsetAmount: amount,
-        userId: 'EXT_IBM',            // External integration user
+        userId: 'IB_SER',            // External integration user
         source: 'EXTIB',              // External integration source
         xref: xref,
         narrative: narrative || `TRANSFER-${fromAccount}-TO-${toAccount}`

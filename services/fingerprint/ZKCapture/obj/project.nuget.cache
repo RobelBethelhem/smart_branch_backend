@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "nCSt0HhzJ7I=",
+  "dgSpecHash": "8eJv2zYQRqFjPImjt1FjZGFFHcwZsbT9MpoBr0P3d4yaMHYwInFmIwwDDGyPmFHPRTSCGJOr7QLqbt5Z8Ty4Xg==",
   "success": true,
-  "projectFilePath": "D:\\smart_branch_backend\\services\\fingerprint\\ZKCapture\\ZKCapture.csproj",
+  "projectFilePath": "D:\\ZSmartBranch\\Server\\services\\fingerprint\\ZKCapture\\ZKCapture.csproj",
   "expectedPackageFiles": [],
   "logs": []
 }
