@@ -3,7 +3,15 @@ import UserToken from "../../models/rms/UserToken.js";
 
 const generateTokens = async (user) =>{
     try{
-        const payload = {_id:user._id, roles: user.roles};
+        // Include till_id, branch, flex_id, and user name in JWT for till operations
+        const payload = {
+            _id: user._id,
+            roles: user.roles,
+            till_id: user.till_id,
+            branch: user.branch,
+            flex_id: user.flex_id,
+            user: user.user  // user name
+        };
         const accessToken = jwt.sign(
             payload,
             process.env.ACCESS_TOKEN_PRIVATE_KEY,

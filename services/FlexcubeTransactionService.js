@@ -808,11 +808,22 @@ export async function createTransferTransaction(params) {
 
 /**
  * Update till denominations for deposit (inflow)
- * @param {string} userId - The Flexcube user ID
+ * Table: FBTB_TILL_DETAIL_CCY
+ * Columns: TILL_ID, CCYCODE, DENOMCODE, DENOMTXT, DENOMVAL, DENOMCOUNT, BRANCHCODE, OPENINGBALANCE, INFLOW, OUTFLOW
+ * DENOMCOUNT = OPENINGBALANCE + INFLOW - OUTFLOW (calculated, no need to update directly)
+ * For deposit: INFLOW = INFLOW + count
+ *
+ * @param {string} tillId - The till ID from User model (e.g., 'SARIS_TILL3')
+ * @param {string} branchCode - The branch code from User model (e.g., '159')
  * @param {Object} denomination - Denomination breakdown
  */
-export async function updateTillForDeposit(userId, denomination) {
-    debugLog('TILL_DEPOSIT_START', 'Starting till update for DEPOSIT', { userId, denomination });
+export async function updateTillForDeposit(tillId, branchCode, denomination) {
+    debugLog('TILL_DEPOSIT_START', 'Starting till update for DEPOSIT', { tillId, branchCode, denomination });
+
+    if (!tillId || !branchCode) {
+        debugLog('TILL_DEPOSIT_ERROR', 'Missing tillId or branchCode', { tillId, branchCode });
+        return { success: false, error: 'Missing tillId or branchCode for till update' };
+    }
 
     if (!denomination) {
         debugLog('TILL_DEPOSIT', 'No denomination provided, skipping update');
@@ -838,36 +849,20 @@ export async function updateTillForDeposit(userId, denomination) {
         const count = denomination[field] || 0;
         if (count > 0) {
             debugLog('TILL_DEPOSIT_DENOM', `Adding denomination update: ${field} = ${count} x ${value}`, { field, count, value });
-            // Update DENOMCOUNT and INFLOW
-            // Note: Oracle requires each bind position to have a parameter, even if same value
+            // Update INFLOW for the specific denomination
+            // DENOMCOUNT is calculated automatically: OPENINGBALANCE + INFLOW - OUTFLOW
             updates.push({
-                query: `UPDATE FCUBSPRD.fbtb_till_detail_ccy
-                        SET DENOMCOUNT = DENOMCOUNT + :1, INFLOW = INFLOW + :2
-                        WHERE denomcode = (
-                            SELECT denomcode FROM FCUBSPRD.fbtb_till_detail_ccy
-                            WHERE till_id = (SELECT TILL_ID FROM FCUBSPRD.smtb_user_tills WHERE user_id = UPPER(:3))
-                            AND denomval = :4 AND ccycode = 'ETB'
-                            ORDER BY denomcode ASC FETCH FIRST 1 ROWS ONLY
-                        )
-                        AND till_id = (SELECT TILL_ID FROM FCUBSPRD.smtb_user_tills WHERE user_id = UPPER(:5))
-                        AND ccycode = 'ETB'`,
-                params: [count, count, userId, value, userId],
+                query: `UPDATE FCUBSPRD.FBTB_TILL_DETAIL_CCY
+                        SET INFLOW = INFLOW + :1
+                        WHERE TILL_ID = :2
+                        AND BRANCHCODE = :3
+                        AND DENOMVAL = :4
+                        AND CCYCODE = 'ETB'`,
+                params: [count, tillId, branchCode, value],
                 description: `Deposit denom update: ${field} (${value} ETB) x ${count}`
             });
         }
     }
-
-    // Update till totals
-    const totalAmount = calculateDenominationTotal(denomination);
-    debugLog('TILL_DEPOSIT_TOTAL', `Adding till totals update: INFLOW += ${totalAmount}`, { totalAmount, userId });
-    updates.push({
-        query: `UPDATE FCUBSPRD.fbtb_till_totals
-                SET INFLOW = INFLOW + :1
-                WHERE till_id = (SELECT TILL_ID FROM FCUBSPRD.smtb_user_tills WHERE user_id = UPPER(:2))
-                AND ccycode = 'ETB' AND POSTINGDATE = TO_DATE(CURRENT_DATE)`,
-        params: [totalAmount, userId],
-        description: `Deposit totals update: INFLOW += ${totalAmount}`
-    });
 
     debugLog('TILL_DEPOSIT_QUERIES', `Total queries to execute: ${updates.length}`);
 
@@ -875,15 +870,23 @@ export async function updateTillForDeposit(userId, denomination) {
         // Execute all updates
         let successCount = 0;
         let failCount = 0;
+        let totalRowsAffected = 0;
+
         for (let i = 0; i < updates.length; i++) {
             const { query, params, description } = updates[i];
-            debugLog('TILL_DEPOSIT_EXEC', `Executing query ${i + 1}/${updates.length}: ${description}`, { params });
+            debugLog('TILL_DEPOSIT_EXEC', `Executing query ${i + 1}/${updates.length}: ${description}`, { query, params });
 
             const result = await executeQuery(query, params);
 
             if (result.success) {
                 successCount++;
-                debugLog('TILL_DEPOSIT_RESULT', `Query ${i + 1} SUCCESS`, { rowsAffected: result.rowsAffected || 'unknown' });
+                const rowsAffected = result.rowsAffected || 0;
+                totalRowsAffected += rowsAffected;
+                debugLog('TILL_DEPOSIT_RESULT', `Query ${i + 1} SUCCESS`, { rowsAffected });
+
+                if (rowsAffected === 0) {
+                    debugLog('TILL_DEPOSIT_WARNING', `Query ${i + 1} affected 0 rows - denomination may not exist in till`, { params });
+                }
             } else {
                 failCount++;
                 debugLog('TILL_DEPOSIT_ERROR', `Query ${i + 1} FAILED`, { error: result.error });
@@ -892,9 +895,12 @@ export async function updateTillForDeposit(userId, denomination) {
 
         const finalResult = {
             success: failCount === 0,
-            message: `Till updated for deposit: ${successCount} success, ${failCount} failed`,
+            message: `Till updated for deposit: ${successCount} success, ${failCount} failed, ${totalRowsAffected} rows affected`,
             successCount,
-            failCount
+            failCount,
+            totalRowsAffected,
+            tillId,
+            branchCode
         };
         debugLog('TILL_DEPOSIT_COMPLETE', 'Till deposit update completed', finalResult);
         return finalResult;
@@ -906,12 +912,22 @@ export async function updateTillForDeposit(userId, denomination) {
 
 /**
  * Update till denominations for withdraw (outflow)
- * This is the reverse of deposit - decreases till counts
- * @param {string} userId - The Flexcube user ID
+ * Table: FBTB_TILL_DETAIL_CCY
+ * Columns: TILL_ID, CCYCODE, DENOMCODE, DENOMTXT, DENOMVAL, DENOMCOUNT, BRANCHCODE, OPENINGBALANCE, INFLOW, OUTFLOW
+ * DENOMCOUNT = OPENINGBALANCE + INFLOW - OUTFLOW (calculated, no need to update directly)
+ * For withdraw: OUTFLOW = OUTFLOW + count
+ *
+ * @param {string} tillId - The till ID from User model (e.g., 'SARIS_TILL3')
+ * @param {string} branchCode - The branch code from User model (e.g., '159')
  * @param {Object} denomination - Denomination breakdown
  */
-export async function updateTillForWithdraw(userId, denomination) {
-    debugLog('TILL_WITHDRAW_START', 'Starting till update for WITHDRAW', { userId, denomination });
+export async function updateTillForWithdraw(tillId, branchCode, denomination) {
+    debugLog('TILL_WITHDRAW_START', 'Starting till update for WITHDRAW', { tillId, branchCode, denomination });
+
+    if (!tillId || !branchCode) {
+        debugLog('TILL_WITHDRAW_ERROR', 'Missing tillId or branchCode', { tillId, branchCode });
+        return { success: false, error: 'Missing tillId or branchCode for till update' };
+    }
 
     if (!denomination) {
         debugLog('TILL_WITHDRAW', 'No denomination provided, skipping update');
@@ -937,36 +953,20 @@ export async function updateTillForWithdraw(userId, denomination) {
         const count = denomination[field] || 0;
         if (count > 0) {
             debugLog('TILL_WITHDRAW_DENOM', `Adding denomination update: ${field} = ${count} x ${value}`, { field, count, value });
-            // Update DENOMCOUNT (decrease) and OUTFLOW (increase)
-            // Note: Oracle requires each bind position to have a parameter, even if same value
+            // Update OUTFLOW for the specific denomination
+            // DENOMCOUNT is calculated automatically: OPENINGBALANCE + INFLOW - OUTFLOW
             updates.push({
-                query: `UPDATE FCUBSPRD.fbtb_till_detail_ccy
-                        SET DENOMCOUNT = DENOMCOUNT - :1, OUTFLOW = OUTFLOW + :2
-                        WHERE denomcode = (
-                            SELECT denomcode FROM FCUBSPRD.fbtb_till_detail_ccy
-                            WHERE till_id = (SELECT TILL_ID FROM FCUBSPRD.smtb_user_tills WHERE user_id = UPPER(:3))
-                            AND denomval = :4 AND ccycode = 'ETB'
-                            ORDER BY denomcode ASC FETCH FIRST 1 ROWS ONLY
-                        )
-                        AND till_id = (SELECT TILL_ID FROM FCUBSPRD.smtb_user_tills WHERE user_id = UPPER(:5))
-                        AND ccycode = 'ETB'`,
-                params: [count, count, userId, value, userId],
+                query: `UPDATE FCUBSPRD.FBTB_TILL_DETAIL_CCY
+                        SET OUTFLOW = OUTFLOW + :1
+                        WHERE TILL_ID = :2
+                        AND BRANCHCODE = :3
+                        AND DENOMVAL = :4
+                        AND CCYCODE = 'ETB'`,
+                params: [count, tillId, branchCode, value],
                 description: `Withdraw denom update: ${field} (${value} ETB) x ${count}`
             });
         }
     }
-
-    // Update till totals (outflow)
-    const totalAmount = calculateDenominationTotal(denomination);
-    debugLog('TILL_WITHDRAW_TOTAL', `Adding till totals update: OUTFLOW += ${totalAmount}`, { totalAmount, userId });
-    updates.push({
-        query: `UPDATE FCUBSPRD.fbtb_till_totals
-                SET OUTFLOW = OUTFLOW + :1
-                WHERE till_id = (SELECT TILL_ID FROM FCUBSPRD.smtb_user_tills WHERE user_id = UPPER(:2))
-                AND ccycode = 'ETB' AND POSTINGDATE = TO_DATE(CURRENT_DATE)`,
-        params: [totalAmount, userId],
-        description: `Withdraw totals update: OUTFLOW += ${totalAmount}`
-    });
 
     debugLog('TILL_WITHDRAW_QUERIES', `Total queries to execute: ${updates.length}`);
 
@@ -974,15 +974,23 @@ export async function updateTillForWithdraw(userId, denomination) {
         // Execute all updates
         let successCount = 0;
         let failCount = 0;
+        let totalRowsAffected = 0;
+
         for (let i = 0; i < updates.length; i++) {
             const { query, params, description } = updates[i];
-            debugLog('TILL_WITHDRAW_EXEC', `Executing query ${i + 1}/${updates.length}: ${description}`, { params });
+            debugLog('TILL_WITHDRAW_EXEC', `Executing query ${i + 1}/${updates.length}: ${description}`, { query, params });
 
             const result = await executeQuery(query, params);
 
             if (result.success) {
                 successCount++;
-                debugLog('TILL_WITHDRAW_RESULT', `Query ${i + 1} SUCCESS`, { rowsAffected: result.rowsAffected || 'unknown' });
+                const rowsAffected = result.rowsAffected || 0;
+                totalRowsAffected += rowsAffected;
+                debugLog('TILL_WITHDRAW_RESULT', `Query ${i + 1} SUCCESS`, { rowsAffected });
+
+                if (rowsAffected === 0) {
+                    debugLog('TILL_WITHDRAW_WARNING', `Query ${i + 1} affected 0 rows - denomination may not exist in till`, { params });
+                }
             } else {
                 failCount++;
                 debugLog('TILL_WITHDRAW_ERROR', `Query ${i + 1} FAILED`, { error: result.error });
@@ -991,9 +999,12 @@ export async function updateTillForWithdraw(userId, denomination) {
 
         const finalResult = {
             success: failCount === 0,
-            message: `Till updated for withdraw: ${successCount} success, ${failCount} failed`,
+            message: `Till updated for withdraw: ${successCount} success, ${failCount} failed, ${totalRowsAffected} rows affected`,
             successCount,
-            failCount
+            failCount,
+            totalRowsAffected,
+            tillId,
+            branchCode
         };
         debugLog('TILL_WITHDRAW_COMPLETE', 'Till withdraw update completed', finalResult);
         return finalResult;
@@ -1001,6 +1012,193 @@ export async function updateTillForWithdraw(userId, denomination) {
         debugLog('TILL_WITHDRAW_EXCEPTION', 'Exception during till withdraw update', { error: error.message, stack: error.stack });
         return { success: false, error: error.message };
     }
+}
+
+// ============================================
+// TILL QUERY FUNCTIONS
+// ============================================
+
+/**
+ * Get available denomination counts from a till
+ * Table: FBTB_TILL_DETAIL_CCY
+ * DENOMCOUNT = OPENINGBALANCE + INFLOW - OUTFLOW (calculated in Oracle, not stored)
+ *
+ * @param {string} tillId - The till ID from User model (e.g., 'SARIS_TILL3')
+ * @param {string} branchCode - The branch code from User model (e.g., '159')
+ * @returns {Object} Available denomination counts
+ */
+export async function getTillDenominations(tillId, branchCode) {
+    debugLog('GET_TILL_DENOMS', 'Fetching till denominations', { tillId, branchCode });
+
+    if (!tillId || !branchCode) {
+        return { success: false, error: 'Missing tillId or branchCode' };
+    }
+
+    try {
+        const query = `
+            SELECT
+                DENOMVAL,
+                DENOMTXT,
+                DENOMCOUNT,
+                OPENINGBALANCE,
+                INFLOW,
+                OUTFLOW,
+                (OPENINGBALANCE + INFLOW - OUTFLOW) AS AVAILABLE_COUNT
+            FROM FCUBSPRD.FBTB_TILL_DETAIL_CCY
+            WHERE TILL_ID = :1
+            AND BRANCHCODE = :2
+            AND CCYCODE = 'ETB'
+            ORDER BY DENOMVAL DESC
+        `;
+
+        const result = await executeQuery(query, [tillId, branchCode]);
+
+        if (!result.success) {
+            debugLog('GET_TILL_DENOMS_ERROR', 'Query failed', { error: result.error });
+            return { success: false, error: result.error };
+        }
+
+        // Map the results to a more usable format
+        const denominations = {};
+        const denomDetails = [];
+
+        const denomMap = {
+            200: 'd200',
+            100: 'd100',
+            50: 'd50',
+            10: 'd10',
+            5: 'd5',
+            1: 'd1',
+            0.5: 'dc50',
+            0.25: 'dc25',
+            0.1: 'dc10',
+            0.05: 'dc5',
+            0.01: 'dc1'
+        };
+
+        for (const row of result.data || []) {
+            const denomVal = parseFloat(row.DENOMVAL);
+            const availableCount = row.AVAILABLE_COUNT || (row.OPENINGBALANCE + row.INFLOW - row.OUTFLOW) || 0;
+
+            // Map to our denomination keys
+            const key = denomMap[denomVal];
+            if (key) {
+                denominations[key] = availableCount;
+            }
+
+            denomDetails.push({
+                value: denomVal,
+                text: row.DENOMTXT,
+                available: availableCount,
+                openingBalance: row.OPENINGBALANCE || 0,
+                inflow: row.INFLOW || 0,
+                outflow: row.OUTFLOW || 0
+            });
+        }
+
+        debugLog('GET_TILL_DENOMS_SUCCESS', 'Till denominations fetched', { denominations, denomDetails });
+
+        return {
+            success: true,
+            tillId,
+            branchCode,
+            denominations,
+            details: denomDetails
+        };
+    } catch (error) {
+        debugLog('GET_TILL_DENOMS_EXCEPTION', 'Exception fetching till denoms', { error: error.message });
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Auto-populate denomination based on amount and available till counts
+ * Uses greedy algorithm but respects available counts in till
+ *
+ * @param {number} amount - The amount to break down
+ * @param {string} tillId - The till ID from User model
+ * @param {string} branchCode - The branch code from User model
+ * @returns {Object} Denomination breakdown
+ */
+export async function autopopulateDenominationWithTillCheck(amount, tillId, branchCode) {
+    debugLog('AUTOPOPULATE_WITH_TILL', 'Auto-populating with till check', { amount, tillId, branchCode });
+
+    // Get current till denominations
+    const tillResult = await getTillDenominations(tillId, branchCode);
+
+    if (!tillResult.success) {
+        debugLog('AUTOPOPULATE_WITH_TILL', 'Could not fetch till, using basic autopopulate');
+        // Fall back to basic autopopulate without till check
+        return {
+            success: true,
+            denomination: autopopulateDenomination(amount),
+            tillAvailable: null,
+            warning: 'Could not verify till availability'
+        };
+    }
+
+    const available = tillResult.denominations;
+    const denominations = [
+        { key: 'd200', value: 200 },
+        { key: 'd100', value: 100 },
+        { key: 'd50', value: 50 },
+        { key: 'd10', value: 10 },
+        { key: 'd5', value: 5 },
+        { key: 'd1', value: 1 },
+        { key: 'dc50', value: 0.50 },
+        { key: 'dc25', value: 0.25 },
+        { key: 'dc10', value: 0.10 },
+        { key: 'dc5', value: 0.05 },
+        { key: 'dc1', value: 0.01 },
+    ];
+
+    let remaining = Math.round(amount * 100) / 100;
+    const result = {};
+    const insufficientDenoms = [];
+
+    for (const { key, value } of denominations) {
+        if (remaining >= value) {
+            // Calculate how many we need
+            const needed = Math.floor(remaining / value);
+            // Check how many are available
+            const availableCount = available[key] || 0;
+            // Use the minimum of needed and available
+            const toUse = Math.min(needed, availableCount);
+
+            result[key] = toUse;
+            remaining = Math.round((remaining - toUse * value) * 100) / 100;
+
+            if (toUse < needed) {
+                insufficientDenoms.push({
+                    denomination: value,
+                    needed: needed,
+                    available: availableCount,
+                    used: toUse
+                });
+            }
+        } else {
+            result[key] = 0;
+        }
+    }
+
+    const canFulfill = remaining < 0.01; // Allow for floating point errors
+
+    debugLog('AUTOPOPULATE_WITH_TILL_RESULT', 'Auto-populate result', {
+        denomination: result,
+        remaining,
+        canFulfill,
+        insufficientDenoms
+    });
+
+    return {
+        success: true,
+        denomination: result,
+        tillAvailable: available,
+        canFulfill,
+        remaining: remaining > 0.01 ? remaining : 0,
+        insufficientDenoms: insufficientDenoms.length > 0 ? insufficientDenoms : null,
+        warning: !canFulfill ? `Insufficient till balance. Cannot fulfill ${remaining.toFixed(2)} ETB` : null
+    };
 }
 
 // ============================================
@@ -1079,9 +1277,9 @@ export async function processWithdrawTransaction(params) {
             };
         }
 
-        // Update till
-        if (denomination && user.flex_id) {
-            await updateTillForWithdraw(user.flex_id, denomination);
+        // Update till using user's till_id and branch from User model
+        if (denomination && user.till_id && user.branch) {
+            await updateTillForWithdraw(user.till_id, user.branch, denomination);
         }
 
         return {
@@ -1143,9 +1341,9 @@ export async function processCheckerApproval(params) {
             denomination
         });
 
-        // Update till for withdraw
-        if (flexResult.success && denomination && checker.flex_id) {
-            await updateTillForWithdraw(checker.flex_id, denomination);
+        // Update till for withdraw using checker's till_id and branch
+        if (flexResult.success && denomination && checker.till_id && checker.branch) {
+            await updateTillForWithdraw(checker.till_id, checker.branch, denomination);
         }
     } else if (transactionType === 'deposit') {
         flexResult = await createDepositTransaction({
@@ -1155,9 +1353,9 @@ export async function processCheckerApproval(params) {
             denomination
         });
 
-        // Update till for deposit
-        if (flexResult.success && denomination && checker.flex_id) {
-            await updateTillForDeposit(checker.flex_id, denomination);
+        // Update till for deposit using checker's till_id and branch
+        if (flexResult.success && denomination && checker.till_id && checker.branch) {
+            await updateTillForDeposit(checker.till_id, checker.branch, denomination);
         }
     } else if (transactionType === 'transfer') {
         flexResult = await createTransferTransaction({
@@ -1203,6 +1401,8 @@ export default {
     createTransferTransaction,
     updateTillForDeposit,
     updateTillForWithdraw,
+    getTillDenominations,
+    autopopulateDenominationWithTillCheck,
     generateXref,
     processWithdrawTransaction,
     processCheckerApproval

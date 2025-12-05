@@ -5093,10 +5093,15 @@ router.post("/process-withdraw-with-denomination", auth, async (req, res) => {
         // ============================================
         // STEP 3: Update Till (deduct from teller's till)
         // ============================================
-        console.log('\n[WITHDRAW_ROUTE] STEP 2: Starting Till Update for user:', posted_by || req.user?.userId);
+        const tillId = req.user?.till_id;
+        const branchCode = req.user?.branch;
+        console.log('\n[WITHDRAW_ROUTE] STEP 2: Starting Till Update');
+        console.log('[WITHDRAW_ROUTE] Till ID:', tillId, 'Branch Code:', branchCode);
+        console.log('[WITHDRAW_ROUTE] User from JWT:', JSON.stringify(req.user, null, 2));
         try {
             const tillResult = await FlexcubeTransactionService.updateTillForWithdraw(
-                posted_by || req.user?.userId,
+                tillId,
+                branchCode,
                 finalDenomination
             );
             console.log('[WITHDRAW_ROUTE] Till Update Result:', JSON.stringify(tillResult, null, 2));
@@ -5284,10 +5289,15 @@ router.post("/process-deposit-with-denomination", auth, async (req, res) => {
         // ============================================
         // STEP 3: Update Till (add to teller's till)
         // ============================================
-        console.log('\n[DEPOSIT_ROUTE] STEP 2: Starting Till Update for user:', posted_by || req.user?.userId);
+        const tillId = req.user?.till_id;
+        const branchCode = req.user?.branch;
+        console.log('\n[DEPOSIT_ROUTE] STEP 2: Starting Till Update');
+        console.log('[DEPOSIT_ROUTE] Till ID:', tillId, 'Branch Code:', branchCode);
+        console.log('[DEPOSIT_ROUTE] User from JWT:', JSON.stringify(req.user, null, 2));
         try {
             const tillResult = await FlexcubeTransactionService.updateTillForDeposit(
-                posted_by || req.user?.userId,
+                tillId,
+                branchCode,
                 finalDenomination
             );
             console.log('[DEPOSIT_ROUTE] Till Update Result:', JSON.stringify(tillResult, null, 2));
@@ -5730,18 +5740,25 @@ router.post("/approve-pending-transaction", auth, async (req, res) => {
 
         // ============================================
         // STEP 3: Update Till based on transaction type
+        // Note: Using checker's till_id since they're processing the transaction
+        // If this should use maker's till, we need to lookup maker's user record
         // ============================================
+        const tillId = req.user?.till_id;
+        const branchCode = req.user?.branch;
         console.log('\n[CHECKER_APPROVAL] STEP 2: Starting Till Update...');
+        console.log('[CHECKER_APPROVAL] Till ID:', tillId, 'Branch Code:', branchCode);
         try {
             if (transaction_type === 'Deposit') {
                 const tillResult = await FlexcubeTransactionService.updateTillForDeposit(
-                    transaction.posted_by,
+                    tillId,
+                    branchCode,
                     transaction.denomination
                 );
                 console.log('[CHECKER_APPROVAL] Till Update (Deposit) Result:', JSON.stringify(tillResult, null, 2));
             } else {
                 const tillResult = await FlexcubeTransactionService.updateTillForWithdraw(
-                    transaction.posted_by,
+                    tillId,
+                    branchCode,
                     transaction.denomination
                 );
                 console.log('[CHECKER_APPROVAL] Till Update (Withdraw) Result:', JSON.stringify(tillResult, null, 2));
@@ -5835,6 +5852,124 @@ router.get("/transaction-details/:type/:id", auth, async (req, res) => {
         res.status(500).json({
             error: true,
             message: e.message || "Failed to fetch transaction details"
+        });
+    }
+});
+
+
+// ============================================
+// GET TELLER'S TILL DENOMINATIONS
+// Returns available denomination counts from teller's till
+// ============================================
+router.get("/get_till_denominations", auth, roleCheck(["Teller", "Maker", "Admin"]), async (req, res, next) => {
+    console.log('\n' + '='.repeat(80));
+    console.log('[GET_TILL_DENOMS] Fetching teller till denominations');
+    console.log('='.repeat(80));
+
+    try {
+        const tillId = req.user?.till_id;
+        const branchCode = req.user?.branch;
+
+        console.log('[GET_TILL_DENOMS] User till_id:', tillId);
+        console.log('[GET_TILL_DENOMS] User branch:', branchCode);
+
+        if (!tillId || !branchCode) {
+            return res.status(400).json({
+                error: true,
+                message: "User does not have till_id or branch configured. Please contact admin to set up your till."
+            });
+        }
+
+        const result = await FlexcubeTransactionService.getTillDenominations(tillId, branchCode);
+
+        if (!result.success) {
+            return res.status(500).json({
+                error: true,
+                message: result.error || "Failed to fetch till denominations"
+            });
+        }
+
+        console.log('[GET_TILL_DENOMS] Successfully fetched till denominations');
+        console.log('='.repeat(80) + '\n');
+
+        res.status(200).json({
+            error: false,
+            message: "Till denominations fetched successfully",
+            data: result
+        });
+    } catch (e) {
+        console.error("[GET_TILL_DENOMS] Error:", e);
+        res.status(500).json({
+            error: true,
+            message: e.message || "Failed to fetch till denominations"
+        });
+    }
+});
+
+
+// ============================================
+// AUTO-POPULATE DENOMINATION WITH TILL CHECK
+// Returns suggested denomination breakdown based on available till counts
+// ============================================
+router.post("/autopopulate_denomination", auth, roleCheck(["Teller", "Maker", "Admin"]), async (req, res, next) => {
+    console.log('\n' + '='.repeat(80));
+    console.log('[AUTOPOPULATE_DENOM] Auto-populating denomination with till check');
+    console.log('='.repeat(80));
+
+    try {
+        const { amount } = req.body;
+
+        if (!amount || isNaN(amount) || amount <= 0) {
+            return res.status(400).json({
+                error: true,
+                message: "Valid positive amount is required"
+            });
+        }
+
+        const tillId = req.user?.till_id;
+        const branchCode = req.user?.branch;
+
+        console.log('[AUTOPOPULATE_DENOM] Amount:', amount);
+        console.log('[AUTOPOPULATE_DENOM] User till_id:', tillId);
+        console.log('[AUTOPOPULATE_DENOM] User branch:', branchCode);
+
+        if (!tillId || !branchCode) {
+            // Fall back to basic autopopulate without till check
+            console.log('[AUTOPOPULATE_DENOM] No till configured, using basic autopopulate');
+            const denomination = FlexcubeTransactionService.autopopulateDenomination(parseFloat(amount));
+            return res.status(200).json({
+                error: false,
+                message: "Denomination auto-populated (till not configured)",
+                data: {
+                    denomination,
+                    tillAvailable: null,
+                    canFulfill: true,
+                    warning: "User does not have till configured - cannot verify availability"
+                }
+            });
+        }
+
+        const result = await FlexcubeTransactionService.autopopulateDenominationWithTillCheck(
+            parseFloat(amount),
+            tillId,
+            branchCode
+        );
+
+        console.log('[AUTOPOPULATE_DENOM] Result:', JSON.stringify(result, null, 2));
+        console.log('='.repeat(80) + '\n');
+
+        res.status(200).json({
+            error: false,
+            message: result.canFulfill
+                ? "Denomination auto-populated successfully"
+                : "Denomination auto-populated with warnings - insufficient till balance",
+            data: result
+        });
+    } catch (e) {
+        console.error("[AUTOPOPULATE_DENOM] Error:", e);
+        res.status(500).json({
+            error: true,
+            message: e.message || "Failed to auto-populate denomination"
         });
     }
 });
