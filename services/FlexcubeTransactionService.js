@@ -903,12 +903,13 @@ export async function updateTillForDeposit(tillId, branchCode, denomination) {
             // DENOMCOUNT is calculated automatically: OPENINGBALANCE + INFLOW - OUTFLOW
             updates.push({
                 query: `UPDATE FCUBSPRD.FBTB_TILL_DETAIL_CCY
-                        SET INFLOW = INFLOW + :1
-                        WHERE TILL_ID = :2
-                        AND BRANCHCODE = :3
-                        AND DENOMVAL = :4
+                        SET INFLOW = INFLOW + :1,
+                            DENOMCOUNT = OPENINGBALANCE + (INFLOW + :2) - OUTFLOW
+                        WHERE TILL_ID = :3
+                        AND BRANCHCODE = :4
+                        AND DENOMVAL = :5
                         AND CCYCODE = 'ETB'`,
-                params: [count, tillId, branchCode, value],
+                params: [count, count, tillId, branchCode, value],
                 description: `Deposit denom update: ${field} (${value} ETB) x ${count}`
             });
         }
@@ -1051,16 +1052,17 @@ export async function updateTillForWithdraw(tillId, branchCode, denomination) {
         const count = denomination[field] || 0;
         if (count > 0) {
             debugLog('TILL_WITHDRAW_DENOM', `Adding denomination update: ${field} = ${count} x ${value}`, { field, count, value });
-            // Update OUTFLOW for the specific denomination
-            // DENOMCOUNT is calculated automatically: OPENINGBALANCE + INFLOW - OUTFLOW
+            // Update OUTFLOW and DENOMCOUNT for the specific denomination
+            // DENOMCOUNT = OPENINGBALANCE + INFLOW - OUTFLOW
             updates.push({
                 query: `UPDATE FCUBSPRD.FBTB_TILL_DETAIL_CCY
-                        SET OUTFLOW = OUTFLOW + :1
-                        WHERE TILL_ID = :2
-                        AND BRANCHCODE = :3
-                        AND DENOMVAL = :4
+                        SET OUTFLOW = OUTFLOW + :1,
+                            DENOMCOUNT = OPENINGBALANCE + INFLOW - (OUTFLOW + :2)
+                        WHERE TILL_ID = :3
+                        AND BRANCHCODE = :4
+                        AND DENOMVAL = :5
                         AND CCYCODE = 'ETB'`,
-                params: [count, tillId, branchCode, value],
+                params: [count, count, tillId, branchCode, value],
                 description: `Withdraw denom update: ${field} (${value} ETB) x ${count}`
             });
         }
