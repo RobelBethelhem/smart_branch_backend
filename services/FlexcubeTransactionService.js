@@ -414,6 +414,7 @@ export function buildCreateTransactionSOAP(params) {
     });
 
     // IMPORTANT: Always use FTT for TXNTRN and OFFSETTRN as per Flexcube requirements
+    // TXNBRN should be same as BRN (customer branch)
     const soapMessage = `<?xml version="1.0" encoding="UTF-8"?>
 <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:fcub="http://fcubs.ofss.com/service/FCUBSRTService">
     <soapenv:Header/>
@@ -436,7 +437,7 @@ export function buildCreateTransactionSOAP(params) {
                     <fcub:XREF>${flexcubeXref}</fcub:XREF>
                     <fcub:PRD>${product}</fcub:PRD>
                     <fcub:BRN>${branch}</fcub:BRN>
-                    <fcub:TXNBRN>${txnBranch}</fcub:TXNBRN>
+                    <fcub:TXNBRN>${branch}</fcub:TXNBRN>
                     <fcub:TXNACC>${txnAccount}</fcub:TXNACC>
                     <fcub:TXNCCY>${txnCurrency}</fcub:TXNCCY>
                     <fcub:TXNAMT>${parseFloat(txnAmount).toFixed(2)}</fcub:TXNAMT>
@@ -449,16 +450,18 @@ export function buildCreateTransactionSOAP(params) {
                     <fcub:TXNDATE>${today}</fcub:TXNDATE>
                     <fcub:VALDATE>${today}</fcub:VALDATE>
                     <fcub:NARRATIVE>${txnNarrative}</fcub:NARRATIVE>
-                    <fcub:Charge-Details>
-                        <fcub:CHGCOMP>CHME</fcub:CHGCOMP>
-                        <fcub:CHGAMT>0.00</fcub:CHGAMT>
-                        <fcub:CHGCCY>ETB</fcub:CHGCCY>
-                    </fcub:Charge-Details>
                 </fcub:Transaction-Details>
             </fcub:FCUBS_BODY>
         </fcub:CREATETRANSACTION_FSFS_REQ>
     </soapenv:Body>
 </soapenv:Envelope>`;
+
+    // NOTE: Charge-Details commented out for now
+    // <fcub:Charge-Details>
+    //     <fcub:CHGCOMP>CHME</fcub:CHGCOMP>
+    //     <fcub:CHGAMT>0.00</fcub:CHGAMT>
+    //     <fcub:CHGCCY>ETB</fcub:CHGCCY>
+    // </fcub:Charge-Details>
 
     return soapMessage;
 }
