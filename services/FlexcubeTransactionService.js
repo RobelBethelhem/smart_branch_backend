@@ -371,33 +371,49 @@ export async function checkMakerCheckerThreshold(amount, currency = 'ETB') {
 
 /**
  * Build SOAP message for Flexcube CreateTransaction
+ * Matches the format required by Oracle SOA FCUBSRTService
  * @param {Object} params Transaction parameters
  * @returns {string} SOAP XML message
  */
 export function buildCreateTransactionSOAP(params) {
     const {
-        product = 'ETAL',         // Product code (CSWL for withdrawal, CSDP for deposit)
+        product = 'ETAL',         // Product code (CSWL for withdrawal, CSDP for deposit, ETAL for transfer)
         branch,                    // Transaction branch
         txnBranch,                // Teller branch
         txnAccount,               // Transaction account (customer account)
         txnCurrency = 'ETB',
         txnAmount,
-        txnCode = 'FTT',          // Transaction code (FTT for transfer, CDP for deposit, CWL for withdraw)
         offsetBranch,             // Offset branch (GL account branch)
         offsetAccount,            // Offset account (GL account or other customer account)
         offsetCurrency = 'ETB',
         offsetAmount,
-        offsetCode = 'FTT',       // Offset transaction code
-        userId = 'ABORANAT',
-        source = 'ABORANAT',
-        xref = ''                 // External reference (16-digit)
+        userId = 'EXT_IBM',       // Flexcube user ID - use EXT_IBM for external integration
+        source = 'EXTIB',         // Source system - use EXTIB for external integration
+        xref = '',                // External reference (16-digit)
+        narrative = ''            // Transaction narrative/description
     } = params;
 
-    debugLog('SOAP_BUILD', 'Building SOAP message', {
-        product, branch, txnBranch, txnAccount, txnAmount, txnCode,
-        offsetBranch, offsetAccount, offsetAmount, offsetCode, userId, xref
+    // Prepend SMBR to XREF for Flexcube (Smart Branch identifier)
+    const flexcubeXref = xref ? `SMBR${xref}` : `SMBR${Date.now()}`;
+
+    // Generate MSGID from XREF (should be unique)
+    const msgId = flexcubeXref;
+    // CORRELID is typically first 18 characters of MSGID
+    const correlId = msgId.length >= 18 ? msgId.substring(0, 18) : msgId.padEnd(18, '0');
+
+    // Get current date in YYYY-MM-DD format for TXNDATE and VALDATE
+    const today = new Date().toISOString().split('T')[0];
+
+    // Build narrative - use provided or default to XREF in brackets
+    const txnNarrative = narrative || `[${flexcubeXref}]`;
+
+    debugLog('SOAP_BUILD', 'Building SOAP message (Flexcube SOA Format)', {
+        product, branch, txnBranch, txnAccount, txnAmount,
+        offsetBranch, offsetAccount, offsetAmount,
+        userId, source, xref: flexcubeXref, msgId, correlId, txnDate: today
     });
 
+    // IMPORTANT: Always use FTT for TXNTRN and OFFSETTRN as per Flexcube requirements
     const soapMessage = `<?xml version="1.0" encoding="UTF-8"?>
 <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:fcub="http://fcubs.ofss.com/service/FCUBSRTService">
     <soapenv:Header/>
@@ -406,26 +422,38 @@ export function buildCreateTransactionSOAP(params) {
             <fcub:FCUBS_HEADER>
                 <fcub:SOURCE>${source}</fcub:SOURCE>
                 <fcub:UBSCOMP>FCUBS</fcub:UBSCOMP>
+                <fcub:MSGID>${msgId}</fcub:MSGID>
+                <fcub:CORRELID>${correlId}</fcub:CORRELID>
                 <fcub:USERID>${userId}</fcub:USERID>
                 <fcub:BRANCH>${branch}</fcub:BRANCH>
+                <fcub:MODULEID>RT</fcub:MODULEID>
                 <fcub:SERVICE>FCUBSRTService</fcub:SERVICE>
                 <fcub:OPERATION>CreateTransaction</fcub:OPERATION>
+                <fcub:MSGSTAT>SUCCESS</fcub:MSGSTAT>
             </fcub:FCUBS_HEADER>
             <fcub:FCUBS_BODY>
                 <fcub:Transaction-Details>
+                    <fcub:XREF>${flexcubeXref}</fcub:XREF>
                     <fcub:PRD>${product}</fcub:PRD>
                     <fcub:BRN>${branch}</fcub:BRN>
                     <fcub:TXNBRN>${txnBranch}</fcub:TXNBRN>
                     <fcub:TXNACC>${txnAccount}</fcub:TXNACC>
                     <fcub:TXNCCY>${txnCurrency}</fcub:TXNCCY>
-                    <fcub:TXNAMT>${txnAmount}</fcub:TXNAMT>
-                    <fcub:TXNTRN>${txnCode}</fcub:TXNTRN>
+                    <fcub:TXNAMT>${parseFloat(txnAmount).toFixed(2)}</fcub:TXNAMT>
+                    <fcub:TXNTRN>FTT</fcub:TXNTRN>
                     <fcub:OFFSETBRN>${offsetBranch}</fcub:OFFSETBRN>
                     <fcub:OFFSETACC>${offsetAccount}</fcub:OFFSETACC>
                     <fcub:OFFSETCCY>${offsetCurrency}</fcub:OFFSETCCY>
-                    <fcub:OFFSETAMT>${offsetAmount || txnAmount}</fcub:OFFSETAMT>
-                    <fcub:OFFSETTRN>${offsetCode}</fcub:OFFSETTRN>
-                    ${xref ? `<fcub:XREF>${xref}</fcub:XREF>` : ''}
+                    <fcub:OFFSETAMT>${parseFloat(offsetAmount || txnAmount).toFixed(2)}</fcub:OFFSETAMT>
+                    <fcub:OFFSETTRN>FTT</fcub:OFFSETTRN>
+                    <fcub:TXNDATE>${today}</fcub:TXNDATE>
+                    <fcub:VALDATE>${today}</fcub:VALDATE>
+                    <fcub:NARRATIVE>${txnNarrative}</fcub:NARRATIVE>
+                    <fcub:Charge-Details>
+                        <fcub:CHGCOMP>CHME</fcub:CHGCOMP>
+                        <fcub:CHGAMT>0.00</fcub:CHGAMT>
+                        <fcub:CHGCCY>ETB</fcub:CHGCCY>
+                    </fcub:Charge-Details>
                 </fcub:Transaction-Details>
             </fcub:FCUBS_BODY>
         </fcub:CREATETRANSACTION_FSFS_REQ>
@@ -442,7 +470,7 @@ export function buildCreateTransactionSOAP(params) {
 export async function executeFlexcubeTransaction(soapMessage, endpoint = null) {
     // Default endpoint - should be configured in environment
     const flexcubeEndpoint = endpoint || process.env.FLEXCUBE_RT_SERVICE_URL ||
-        'http://10.1.245.18:7003/FCUBSRTService/FCUBSRTService';
+        'http://10.1.2.138:7004/soa-infra/services/default/FCUBSRTService/fcubsrtserviceprocess_client_ep?WSDL';
 
     // Timeout in milliseconds (30 seconds)
     const TIMEOUT_MS = 30000;
@@ -610,7 +638,7 @@ export async function createDepositTransaction(params) {
         tellerBranch,
         glAccount = '1031110049409011', // Default GL account for cash
         xref,
-        userId = 'ABORANAT'
+        narrative = ''
     } = params;
 
     const customerBranch = extractBranchFromAccount(customerAccount);
@@ -621,8 +649,7 @@ export async function createDepositTransaction(params) {
         tellerBranch,
         customerBranch,
         glAccount,
-        xref,
-        userId
+        xref
     });
 
     const soapParams = {
@@ -632,15 +659,14 @@ export async function createDepositTransaction(params) {
         txnAccount: glAccount,        // Debit GL account (cash in)
         txnCurrency: 'ETB',
         txnAmount: amount,
-        txnCode: 'CDP',               // Cash Deposit code
         offsetBranch: customerBranch,
         offsetAccount: customerAccount, // Credit customer account
         offsetCurrency: 'ETB',
         offsetAmount: amount,
-        offsetCode: 'CDP',
-        userId: userId,
-        source: 'ABORANAT',
-        xref: xref
+        userId: 'EXT_IBM',            // External integration user
+        source: 'EXTIB',              // External integration source
+        xref: xref,
+        narrative: narrative || `DEPOSIT-${customerAccount}`
     };
 
     debugLog('DEPOSIT_TXN_PARAMS', 'SOAP Parameters', soapParams);
@@ -668,7 +694,7 @@ export async function createWithdrawTransaction(params) {
         tellerBranch,
         glAccount = '1031110049409011', // Default GL account for cash
         xref,
-        userId = 'ABORANAT'
+        narrative = ''
     } = params;
 
     const customerBranch = extractBranchFromAccount(customerAccount);
@@ -679,8 +705,7 @@ export async function createWithdrawTransaction(params) {
         tellerBranch,
         customerBranch,
         glAccount,
-        xref,
-        userId
+        xref
     });
 
     const soapParams = {
@@ -690,15 +715,14 @@ export async function createWithdrawTransaction(params) {
         txnAccount: customerAccount,  // Debit customer account
         txnCurrency: 'ETB',
         txnAmount: amount,
-        txnCode: 'CWL',               // Cash Withdrawal code
         offsetBranch: tellerBranch || customerBranch,
         offsetAccount: glAccount,     // Credit GL account (teller's till)
         offsetCurrency: 'ETB',
         offsetAmount: amount,
-        offsetCode: 'CWL',
-        userId: userId,
-        source: 'ABORANAT',
-        xref: xref
+        userId: 'EXT_IBM',            // External integration user
+        source: 'EXTIB',              // External integration source
+        xref: xref,
+        narrative: narrative || `WITHDRAW-${customerAccount}`
     };
 
     debugLog('WITHDRAW_TXN_PARAMS', 'SOAP Parameters', soapParams);
@@ -728,8 +752,7 @@ export async function createTransferTransaction(params) {
         amount,
         tellerBranch,
         xref,
-        userId = 'ABORANAT',
-        narration = ''
+        narrative = ''
     } = params;
 
     const fromBranch = extractBranchFromAccount(fromAccount);
@@ -742,9 +765,7 @@ export async function createTransferTransaction(params) {
         tellerBranch,
         fromBranch,
         toBranch,
-        xref,
-        userId,
-        narration
+        xref
     });
 
     const soapParams = {
@@ -754,15 +775,14 @@ export async function createTransferTransaction(params) {
         txnAccount: fromAccount,      // Debit source account
         txnCurrency: 'ETB',
         txnAmount: amount,
-        txnCode: 'FTT',               // Fund Transfer code
         offsetBranch: toBranch,
         offsetAccount: toAccount,     // Credit destination account
         offsetCurrency: 'ETB',
         offsetAmount: amount,
-        offsetCode: 'FTT',
-        userId: userId,
-        source: 'ABORANAT',
-        xref: xref
+        userId: 'EXT_IBM',            // External integration user
+        source: 'EXTIB',              // External integration source
+        xref: xref,
+        narrative: narrative || `TRANSFER-${fromAccount}-TO-${toAccount}`
     };
 
     debugLog('TRANSFER_TXN_PARAMS', 'SOAP Parameters', soapParams);

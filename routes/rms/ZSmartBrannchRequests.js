@@ -5039,7 +5039,7 @@ router.post("/process-withdraw-with-denomination", auth, async (req, res) => {
             tellerBranch: withdraw.branch || FlexcubeTransactionService.extractBranchFromAccount(withdraw.account_number),
             glAccount: '1031110049409011', // GL account for cash
             xref: withdraw.xref,
-            userId: posted_by || req.user?.name || 'ABORANAT'
+            narrative: `WITHDRAW-${withdraw.account_number}-BY-${posted_by || req.user?.name || 'TELLER'}`
         });
 
         console.log('\n[WITHDRAW_ROUTE] SOAP Result:', JSON.stringify({
@@ -5230,7 +5230,7 @@ router.post("/process-deposit-with-denomination", auth, async (req, res) => {
             tellerBranch: deposit.branch || FlexcubeTransactionService.extractBranchFromAccount(deposit.account_number),
             glAccount: '1031110049409011', // GL account for cash
             xref: deposit.xref,
-            userId: posted_by || req.user?.name || 'ABORANAT'
+            narrative: `DEPOSIT-${deposit.account_number}-BY-${posted_by || req.user?.name || 'TELLER'}`
         });
 
         console.log('\n[DEPOSIT_ROUTE] SOAP Result:', JSON.stringify({
@@ -5407,8 +5407,7 @@ router.post("/process-transfer", auth, async (req, res) => {
             amount: amount,
             tellerBranch: transfer.branch || FlexcubeTransactionService.extractBranchFromAccount(transfer.account_number),
             xref: transfer.xref,
-            userId: posted_by || req.user?.name || 'ABORANAT',
-            narration: transfer.payment_narration
+            narrative: transfer.payment_narration || `TRANSFER-${transfer.account_number}-TO-${transfer.beneficiary_account_number}`
         });
 
         console.log('\n[TRANSFER_ROUTE] SOAP Result:', JSON.stringify({
@@ -5668,7 +5667,7 @@ router.post("/approve-pending-transaction", auth, async (req, res) => {
                 tellerBranch: transaction.branch || FlexcubeTransactionService.extractBranchFromAccount(transaction.account_number),
                 glAccount: '1031110049409011',
                 xref: transaction.xref,
-                userId: transaction.checker_name || 'ABORANAT'
+                narrative: `WITHDRAW-${transaction.account_number}-MAKER-${transaction.maker_name || transaction.posted_by}-CHECKER-${transaction.checker_name}`
             });
         } else {
             // Deposit - should not normally reach here as deposits don't need checker
@@ -5678,7 +5677,7 @@ router.post("/approve-pending-transaction", auth, async (req, res) => {
                 tellerBranch: transaction.branch || FlexcubeTransactionService.extractBranchFromAccount(transaction.account_number),
                 glAccount: '1031110049409011',
                 xref: transaction.xref,
-                userId: transaction.checker_name || 'ABORANAT'
+                narrative: `DEPOSIT-${transaction.account_number}-MAKER-${transaction.maker_name || transaction.posted_by}-CHECKER-${transaction.checker_name}`
             });
         }
 
