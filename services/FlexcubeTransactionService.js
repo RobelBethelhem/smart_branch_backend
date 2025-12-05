@@ -830,6 +830,56 @@ export async function updateTillForDeposit(tillId, branchCode, denomination) {
         return { success: true, message: 'No denomination to update' };
     }
 
+    // DIAGNOSTIC: First query to see what data exists in the till
+    debugLog('TILL_DEPOSIT_DIAGNOSTIC', 'Querying existing till data to diagnose...');
+    try {
+        const diagnosticQuery = `
+            SELECT TILL_ID, BRANCHCODE, DENOMVAL, DENOMTXT, CCYCODE, INFLOW, OUTFLOW, OPENINGBALANCE
+            FROM FCUBSPRD.FBTB_TILL_DETAIL_CCY
+            WHERE TILL_ID = :1
+            AND BRANCHCODE = :2
+            AND CCYCODE = 'ETB'
+            ORDER BY DENOMVAL DESC
+        `;
+        const diagnosticResult = await executeQuery(diagnosticQuery, [tillId, branchCode]);
+
+        if (diagnosticResult.success && diagnosticResult.data) {
+            debugLog('TILL_DEPOSIT_DIAGNOSTIC_RESULT', `Found ${diagnosticResult.data.length} rows in till`, {
+                tillId,
+                branchCode,
+                rowCount: diagnosticResult.data.length,
+                sampleData: diagnosticResult.data.slice(0, 3) // Show first 3 rows
+            });
+
+            // Log the actual DENOMVAL values in the table
+            const denomVals = diagnosticResult.data.map(row => ({
+                DENOMVAL: row.DENOMVAL,
+                DENOMVAL_TYPE: typeof row.DENOMVAL,
+                DENOMTXT: row.DENOMTXT
+            }));
+            debugLog('TILL_DEPOSIT_DENOMVALS', 'Denomination values in table', denomVals);
+        } else {
+            debugLog('TILL_DEPOSIT_DIAGNOSTIC_EMPTY', 'No data found for this till/branch combination', {
+                tillId,
+                branchCode,
+                error: diagnosticResult.error
+            });
+
+            // Try to find what tills exist for this branch
+            const branchTillsQuery = `
+                SELECT DISTINCT TILL_ID, BRANCHCODE
+                FROM FCUBSPRD.FBTB_TILL_DETAIL_CCY
+                WHERE BRANCHCODE = :1 AND CCYCODE = 'ETB'
+            `;
+            const branchTillsResult = await executeQuery(branchTillsQuery, [branchCode]);
+            if (branchTillsResult.success && branchTillsResult.data) {
+                debugLog('TILL_DEPOSIT_AVAILABLE_TILLS', `Tills available for branch ${branchCode}`, branchTillsResult.data);
+            }
+        }
+    } catch (diagError) {
+        debugLog('TILL_DEPOSIT_DIAGNOSTIC_ERROR', 'Diagnostic query failed', { error: diagError.message });
+    }
+
     const updates = [];
     const denomMap = [
         { field: 'd200', value: 200 },
@@ -932,6 +982,54 @@ export async function updateTillForWithdraw(tillId, branchCode, denomination) {
     if (!denomination) {
         debugLog('TILL_WITHDRAW', 'No denomination provided, skipping update');
         return { success: true, message: 'No denomination to update' };
+    }
+
+    // DIAGNOSTIC: First query to see what data exists in the till
+    debugLog('TILL_WITHDRAW_DIAGNOSTIC', 'Querying existing till data to diagnose...');
+    try {
+        const diagnosticQuery = `
+            SELECT TILL_ID, BRANCHCODE, DENOMVAL, DENOMTXT, CCYCODE, INFLOW, OUTFLOW, OPENINGBALANCE
+            FROM FCUBSPRD.FBTB_TILL_DETAIL_CCY
+            WHERE TILL_ID = :1
+            AND BRANCHCODE = :2
+            AND CCYCODE = 'ETB'
+            ORDER BY DENOMVAL DESC
+        `;
+        const diagnosticResult = await executeQuery(diagnosticQuery, [tillId, branchCode]);
+
+        if (diagnosticResult.success && diagnosticResult.data) {
+            debugLog('TILL_WITHDRAW_DIAGNOSTIC_RESULT', `Found ${diagnosticResult.data.length} rows in till`, {
+                tillId,
+                branchCode,
+                rowCount: diagnosticResult.data.length,
+                sampleData: diagnosticResult.data.slice(0, 3)
+            });
+
+            const denomVals = diagnosticResult.data.map(row => ({
+                DENOMVAL: row.DENOMVAL,
+                DENOMVAL_TYPE: typeof row.DENOMVAL,
+                DENOMTXT: row.DENOMTXT
+            }));
+            debugLog('TILL_WITHDRAW_DENOMVALS', 'Denomination values in table', denomVals);
+        } else {
+            debugLog('TILL_WITHDRAW_DIAGNOSTIC_EMPTY', 'No data found for this till/branch combination', {
+                tillId,
+                branchCode,
+                error: diagnosticResult.error
+            });
+
+            const branchTillsQuery = `
+                SELECT DISTINCT TILL_ID, BRANCHCODE
+                FROM FCUBSPRD.FBTB_TILL_DETAIL_CCY
+                WHERE BRANCHCODE = :1 AND CCYCODE = 'ETB'
+            `;
+            const branchTillsResult = await executeQuery(branchTillsQuery, [branchCode]);
+            if (branchTillsResult.success && branchTillsResult.data) {
+                debugLog('TILL_WITHDRAW_AVAILABLE_TILLS', `Tills available for branch ${branchCode}`, branchTillsResult.data);
+            }
+        }
+    } catch (diagError) {
+        debugLog('TILL_WITHDRAW_DIAGNOSTIC_ERROR', 'Diagnostic query failed', { error: diagError.message });
     }
 
     const updates = [];
