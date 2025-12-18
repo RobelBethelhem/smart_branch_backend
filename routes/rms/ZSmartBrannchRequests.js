@@ -2,6 +2,7 @@ import {Router} from "express";
 import User from "../../models/rms/User.js";
 import Deposit from "../../models/rms/Deposit.js"
 import Withdraw from "../../models/rms/Withdraw.js"
+import ECheck from "../../models/rms/ECheck.js"
 import Transfer from "../../models/rms/Transfer.js"
 import Other_Bank_Transfer from "../../models/rms/Other_Bank_Transfer.js"
 import Air_Ticket_Payment from "../../models/rms/Air_Ticket_Payment.js"
@@ -1083,6 +1084,165 @@ router.post("/withdraw", async(req, res, next) => {
     }
 });
 
+// E-Check Endpoint (same as withdraw + recipient information)
+router.post("/echeck", async(req, res, next) => {
+    try {
+        console.log("E-Check", req.body);
+        req.body.Customer_Unique_Number = req.body.reference_number;
+        delete req.body.reference_number;
+        const {
+            acc_holder_name,
+            recipient_full_name,
+            recipient_phone_number,
+            amount_in_words,
+            amount_in_figures,
+            source_of_funds,
+            signature,
+            account_number,
+            deposited_by,
+            depositor_address,
+            account_type,
+            Customer_Unique_Number,
+            system,
+            branch
+        } = req.body;
+
+        // Validate recipient information
+        if (!recipient_full_name || !recipient_phone_number) {
+            return res.status(400).json({
+                error: true,
+                message: "Recipient full name and phone number are required for E-Check"
+            });
+        }
+
+        let correctedAccountType;
+        switch(account_type.toLowerCase()) {
+            case 'savings':
+                correctedAccountType = 'Saving Account';
+                break;
+            case 'current':
+                correctedAccountType = 'Demand/ Current Deposit Account';
+                break;
+            case 'special':
+                correctedAccountType = 'Special Demand Deposit Account';
+                break;
+            default:
+                correctedAccountType = 'Saving Account';
+        }
+
+        let eCheckData = {
+            acc_holder_name,
+            recipient_full_name,
+            recipient_phone_number,
+            amount_in_words,
+            amount_in_figures,
+            source_of_funds,
+            signature,
+            account_number,
+            deposited_by,
+            depositor_address: {
+                city: depositor_address?.CITY?.toLowerCase() || '',
+                subcity: depositor_address?.SUBCITY?.toLowerCase() || '',
+                woreda: depositor_address?.WOREDA?.toLowerCase() || '',
+                house_number: depositor_address?.HOUSE_NUMBER || '',
+                telephone: depositor_address?.TELEPHONE || ''
+            },
+            account_type: correctedAccountType,
+            Customer_Unique_Number,
+            request_date: new Date().toISOString(),
+            status: 'requested'
+        };
+
+        if (system) {
+            try {
+                const assignmentDetails = await assignTellerBySystem(branch);
+                eCheckData = {
+                    ...eCheckData,
+                    ...assignmentDetails
+                };
+            } catch (assignError) {
+                console.error("Auto-assignment failed:", assignError);
+                return res.status(400).json({
+                    error: true,
+                    message: "Could not auto-assign teller: " + assignError.message
+                });
+            }
+        }
+
+        const newECheck = new ECheck(eCheckData);
+        await newECheck.save();
+
+        const customerNumber = newECheck.account_number.substring(6, 13);
+        console.log("newECheck.account_number", newECheck.account_number);
+        console.log("customerNumber", customerNumber);
+
+        const phoneQuery = `
+            SELECT MOBILE_NUMBER as telephone
+            FROM FCUBSPRD.sttm_cust_personal
+            WHERE CUSTOMER_NO = :1
+        `;
+        const phoneResult = await executeQuery(phoneQuery, [customerNumber]);
+        console.log("phoneResult", phoneResult);
+        if (phoneResult.success && phoneResult.data?.length > 0) {
+            let phoneNumber = phoneResult.data[0].TELEPHONE;
+            console.log("phoneNumber", phoneNumber);
+
+            // Format phone number if needed (remove +, ensure 251 prefix)
+            phoneNumber = phoneNumber.replace('+', '').replace(/^0/, '251');
+
+            // Construct SMS content based on assignment status
+            let smsContent = `Dear ${newECheck.acc_holder_name}.\n\nYour E-Check unique code is **${newECheck.Customer_Unique_Number}**.\n\n`;
+            smsContent += `Recipient: ${newECheck.recipient_full_name} (${newECheck.recipient_phone_number})\n\n`;
+
+            if (newECheck.assigned_to) {
+                smsContent += `Please visit Teller **${newECheck.assigned_to}** for assistance. `;
+            } else {
+                smsContent += `Feel free to receive service from any teller at your convenience. `;
+            }
+
+            smsContent += `\n\nThank you for choosing Smart Branch! We appreciate your business.`;
+
+            // URL encode the SMS content
+            const encodedContent = encodeURIComponent(smsContent);
+
+            // Construct SMS API URL
+            const smsUrl = `https://smsgateway.zemenbank.com/http-api/send?username=smartbranch&password=Y8z6pTB80l6%234siD&to=${phoneNumber}&from=8011&coding=8&content=${encodedContent}`;
+
+            try {
+                // Send SMS using fetch or axios
+                const response = await fetch(smsUrl);
+
+                if (!response.ok) {
+                    console.error("SMS sending failed:", await response.text());
+                }
+            } catch (smsError) {
+                console.error("SMS sending error:", smsError);
+                // Don't return error to client, just log it
+            }
+        }
+
+        res.status(201).json({
+            error: false,
+            message: "E-Check request created successfully",
+            data: {
+                Queue_number: newECheck.Queue_number,
+                Customer_Unique_Number: newECheck.Customer_Unique_Number,
+                request_date: newECheck.request_date,
+                status: newECheck.status,
+                assigned_to: newECheck.assigned_to,
+                recipient_full_name: newECheck.recipient_full_name,
+                recipient_phone_number: newECheck.recipient_phone_number
+            }
+        });
+
+    } catch(e) {
+        console.log("Error", e);
+        res.status(400).json({
+            error: true,
+            message: e.message || "Could Not Do the Operation"
+        });
+    }
+});
 
 // 3. Transfer Endpoint
 router.post("/transfer", async(req, res, next) => {
@@ -2404,28 +2564,33 @@ router.get("/get_assigned_to_me", auth, roleCheck(["Teller", "Maker"]), async(re
         };
 
         // Fetch transactions from all models
-        const [deposits, withdraws, transfers, otherBankTransfers, airTicketPayments] = await Promise.all([
-            Deposit.find({ 
+        const [deposits, withdraws, echecks, transfers, otherBankTransfers, airTicketPayments] = await Promise.all([
+            Deposit.find({
                 assigned_to: user.user,
                 ...dateFilter
             }).sort({ request_date: -1 }),
-            
-            Withdraw.find({ 
+
+            Withdraw.find({
                 assigned_to: user.user,
                 ...dateFilter
             }).sort({ request_date: -1 }),
-            
-            Transfer.find({ 
+
+            ECheck.find({
                 assigned_to: user.user,
                 ...dateFilter
             }).sort({ request_date: -1 }),
-            
-            Other_Bank_Transfer.find({ 
+
+            Transfer.find({
                 assigned_to: user.user,
                 ...dateFilter
             }).sort({ request_date: -1 }),
-            
-            Air_Ticket_Payment.find({ 
+
+            Other_Bank_Transfer.find({
+                assigned_to: user.user,
+                ...dateFilter
+            }).sort({ request_date: -1 }),
+
+            Air_Ticket_Payment.find({
                 assigned_to: user.user,
                 ...dateFilter
             }).sort({ request_date: -1 })
@@ -2440,6 +2605,10 @@ router.get("/get_assigned_to_me", auth, roleCheck(["Teller", "Maker"]), async(re
             ...withdraws.map(t => ({
                 ...t.toObject(),
                 transactionType: 'withdraw'
+            })),
+            ...echecks.map(t => ({
+                ...t.toObject(),
+                transactionType: 'echeck'
             })),
             ...transfers.map(t => ({
                 ...t.toObject(),
@@ -5143,6 +5312,283 @@ router.post("/process-withdraw-with-denomination", auth, async (req, res) => {
         res.status(500).json({
             error: true,
             message: e.message || "Failed to process withdrawal"
+        });
+    }
+});
+
+/**
+ * Process E-Check transaction with denomination (Teller posting - same as withdraw)
+ */
+router.post("/process-echeck-with-denomination", auth, async (req, res) => {
+    try {
+        const {
+            echeck_id,
+            denomination,
+            trn_ref_no,
+            posted_by,
+            remarks
+        } = req.body;
+
+        if (!echeck_id) {
+            return res.status(400).json({
+                error: true,
+                message: "E-Check ID is required"
+            });
+        }
+
+        // Find the E-Check request
+        const echeck = await ECheck.findById(echeck_id);
+        if (!echeck) {
+            return res.status(404).json({
+                error: true,
+                message: "E-Check request not found"
+            });
+        }
+
+        // Validate status
+        if (!['assigned', 'assigned_by_csr'].includes(echeck.status)) {
+            return res.status(400).json({
+                error: true,
+                message: `Cannot process E-Check with status: ${echeck.status}`
+            });
+        }
+
+        const amount = parseFloat(echeck.amount_in_figures);
+
+        // If denomination provided, validate it
+        let finalDenomination = denomination;
+        if (denomination) {
+            const denomTotal = FlexcubeTransactionService.calculateDenominationTotal(denomination);
+            if (Math.abs(denomTotal - amount) > 0.01) {
+                return res.status(400).json({
+                    error: true,
+                    message: `Denomination total (${denomTotal}) does not match amount (${amount})`
+                });
+            }
+        } else {
+            // Auto-populate denomination if not provided
+            finalDenomination = FlexcubeTransactionService.autopopulateDenomination(amount);
+        }
+
+        // Check withdrawal limit (E-Check uses same limits as withdraw)
+        const limitCheck = await FlexcubeTransactionService.checkWithdrawalLimit(
+            echeck.account_number,
+            amount
+        );
+
+        if (!limitCheck.allowed) {
+            // Reject the transaction
+            echeck.status = 'rejected';
+            echeck.rejection_reason = limitCheck.reason;
+            echeck.limit_check_passed = false;
+            echeck.daily_limit = limitCheck.dailyLimit;
+            echeck.daily_withdrawn_before = limitCheck.alreadyWithdrawn;
+            echeck.customer_category = limitCheck.customerCategory;
+            await echeck.save();
+
+            return res.status(400).json({
+                error: true,
+                message: `E-Check rejected: ${limitCheck.reason}`,
+                data: {
+                    limitCheck,
+                    status: 'rejected'
+                }
+            });
+        }
+
+        // Check maker-checker threshold
+        const checkerCheck = await FlexcubeTransactionService.checkMakerCheckerThreshold(amount);
+
+        // Generate XREF if not exists
+        if (!echeck.xref) {
+            echeck.xref = await ECheck.generateXref();
+        }
+
+        // Update E-Check with limit and denomination info
+        echeck.denomination = finalDenomination;
+        echeck.denomination_total = FlexcubeTransactionService.calculateDenominationTotal(finalDenomination);
+        echeck.limit_check_passed = true;
+        echeck.daily_limit = limitCheck.dailyLimit;
+        echeck.daily_withdrawn_before = limitCheck.alreadyWithdrawn;
+        echeck.customer_category = limitCheck.customerCategory;
+        echeck.needs_checker = checkerCheck.needsChecker;
+        echeck.checker_threshold = checkerCheck.threshold;
+
+        if (checkerCheck.needsChecker) {
+            // Needs checker approval - set to pending_checker
+            // Save Maker (Initiator) information
+            echeck.status = 'pending_checker';
+            echeck.maker_name = posted_by || req.user?.name;
+            echeck.maker_id = req.user?.userId || req.user?.id;
+            echeck.maker_date = new Date();
+            echeck.maker_remarks = remarks || '';
+            echeck.posted_by = posted_by || req.user?.name;
+            echeck.posted_date = new Date();
+            await echeck.save();
+
+            console.log('\n' + '='.repeat(80));
+            console.log('[ECHECK_ROUTE] Transaction requires CHECKER APPROVAL');
+            console.log('='.repeat(80));
+            console.log('E-Check ID:', echeck_id);
+            console.log('Account:', echeck.account_number);
+            console.log('Amount:', amount);
+            console.log('Threshold:', checkerCheck.threshold);
+            console.log('Maker (Initiator):', echeck.maker_name);
+            console.log('Maker ID:', echeck.maker_id);
+            console.log('Maker Date:', echeck.maker_date);
+            console.log('Recipient:', echeck.recipient_full_name);
+            console.log('Recipient Phone:', echeck.recipient_phone_number);
+            console.log('Status:', 'pending_checker');
+            console.log('='.repeat(80) + '\n');
+
+            return res.status(200).json({
+                error: false,
+                message: `Transaction requires checker approval (amount ${amount} >= threshold ${checkerCheck.threshold})`,
+                data: {
+                    echeck,
+                    needsChecker: true,
+                    status: 'pending_checker',
+                    maker: {
+                        name: echeck.maker_name,
+                        id: echeck.maker_id,
+                        date: echeck.maker_date
+                    }
+                }
+            });
+        }
+
+        // No checker needed - process directly
+        console.log('\n' + '='.repeat(80));
+        console.log('[ECHECK_ROUTE] Processing E-Check - NO CHECKER NEEDED');
+        console.log('='.repeat(80));
+        console.log('E-Check ID:', echeck_id);
+        console.log('Account:', echeck.account_number);
+        console.log('Amount:', amount);
+        console.log('Branch:', echeck.branch);
+        console.log('XREF:', echeck.xref);
+        console.log('Posted By:', posted_by || req.user?.name);
+        console.log('Recipient:', echeck.recipient_full_name);
+        console.log('Recipient Phone:', echeck.recipient_phone_number);
+        console.log('Denomination:', JSON.stringify(finalDenomination, null, 2));
+        console.log('='.repeat(80) + '\n');
+
+        // ============================================
+        // STEP 1: Execute SOAP Transaction to Flexcube (same as withdraw)
+        // ============================================
+        console.log('[ECHECK_ROUTE] STEP 1: Executing SOAP Transaction to Flexcube...');
+
+        const soapResult = await FlexcubeTransactionService.createWithdrawTransaction({
+            customerAccount: echeck.account_number,
+            amount: amount,
+            tellerBranch: echeck.branch || FlexcubeTransactionService.extractBranchFromAccount(echeck.account_number),
+            glAccount: '101101', // GL account for cash
+            xref: echeck.xref,
+            narrative: `ECHECK-${echeck.account_number}-BY-${posted_by || req.user?.name || 'TELLER'}-TO-${echeck.recipient_full_name}`
+        });
+
+        console.log('\n[ECHECK_ROUTE] SOAP Result:', JSON.stringify({
+            success: soapResult.success,
+            trnRefNo: soapResult.trnRefNo,
+            error: soapResult.error,
+            httpStatus: soapResult.httpStatus
+        }, null, 2));
+
+        // Check if SOAP transaction succeeded
+        if (!soapResult.success) {
+            console.error('[ECHECK_ROUTE] SOAP Transaction FAILED!');
+            console.error('Error:', soapResult.error);
+
+            // Save the failed response but don't mark as posted
+            echeck.flexcube_response = {
+                success: false,
+                error: soapResult.error,
+                rawResponse: soapResult.rawResponse?.substring(0, 1000), // Truncate for storage
+                timestamp: new Date()
+            };
+            echeck.status = 'assigned'; // Keep as assigned so teller can retry
+            await echeck.save();
+
+            return res.status(400).json({
+                error: true,
+                message: `Flexcube transaction failed: ${soapResult.error}`,
+                data: {
+                    soapError: soapResult.error,
+                    echeck
+                }
+            });
+        }
+
+        console.log('[ECHECK_ROUTE] SOAP Transaction SUCCESS!');
+        console.log('Flexcube TRN Ref:', soapResult.trnRefNo);
+
+        // ============================================
+        // STEP 2: Update E-Check record with success
+        // ============================================
+        echeck.status = 'posted';
+        echeck.posted_by = posted_by || req.user?.name;
+        echeck.posted_date = new Date();
+        echeck.trn_ref_no = soapResult.trnRefNo || trn_ref_no || `TRN${Date.now()}`;
+        echeck.flexcube_response = {
+            success: true,
+            trnRefNo: soapResult.trnRefNo,
+            timestamp: new Date()
+        };
+
+        // ============================================
+        // STEP 3: Update Till (deduct from teller's till - same as withdraw)
+        // ============================================
+        const tillId = req.user?.till_id;
+        const branchCode = req.user?.branch;
+        console.log('\n[ECHECK_ROUTE] STEP 2: Starting Till Update');
+        console.log('[ECHECK_ROUTE] Till ID:', tillId, 'Branch Code:', branchCode);
+        console.log('[ECHECK_ROUTE] User from JWT:', JSON.stringify(req.user, null, 2));
+        try {
+            const tillResult = await FlexcubeTransactionService.updateTillForWithdraw(
+                tillId,
+                branchCode,
+                finalDenomination
+            );
+            console.log('[ECHECK_ROUTE] Till Update Result:', JSON.stringify(tillResult, null, 2));
+            echeck.till_updated = tillResult.success;
+            echeck.till_update_date = new Date();
+        } catch (tillError) {
+            console.error("[ECHECK_ROUTE] Till update EXCEPTION:", tillError);
+            // Continue even if till update fails - the Flexcube transaction already succeeded
+            echeck.till_updated = false;
+        }
+
+        // ============================================
+        // STEP 4: Save and return success
+        // ============================================
+        console.log('[ECHECK_ROUTE] STEP 3: Saving E-Check document...');
+        await echeck.save();
+        console.log('[ECHECK_ROUTE] E-Check saved successfully');
+
+        console.log('\n' + '='.repeat(80));
+        console.log('[ECHECK_ROUTE] E-CHECK COMPLETE - SUCCESS');
+        console.log('Status:', echeck.status);
+        console.log('Flexcube TRN Ref:', echeck.trn_ref_no);
+        console.log('Till Updated:', echeck.till_updated);
+        console.log('Recipient:', echeck.recipient_full_name);
+        console.log('Recipient Phone:', echeck.recipient_phone_number);
+        console.log('='.repeat(80) + '\n');
+
+        res.status(200).json({
+            error: false,
+            message: "E-Check processed successfully",
+            data: {
+                echeck,
+                needsChecker: false,
+                status: 'posted',
+                flexcubeTrnRef: soapResult.trnRefNo
+            }
+        });
+
+    } catch (e) {
+        console.error("Error in process E-Check with denomination:", e);
+        res.status(500).json({
+            error: true,
+            message: e.message || "Failed to process E-Check"
         });
     }
 });
