@@ -7,6 +7,7 @@ import Transfer from "../../models/rms/Transfer.js"
 import Other_Bank_Transfer from "../../models/rms/Other_Bank_Transfer.js"
 import Air_Ticket_Payment from "../../models/rms/Air_Ticket_Payment.js"
 import Biometric from "../../models/rms/Biometric.js"
+import OTP from "../../models/rms/OTP.js"
 import mongoose from 'mongoose';
 import auth from "../../middleware/rms/auth.js";
 import roleCheck from "../../middleware/rms/roleCheck.js";
@@ -4788,7 +4789,7 @@ router.get("/biometric/customer/:cif", auth, roleCheck(["Teller", "Maker"]), asy
 // Uses ZK SDK's fast 1:N DBIdentify for efficient matching (~50,000+ templates/second)
 router.post("/biometric/authenticate", async (req, res) => {
     try {
-        const { fingerprint_template } = req.body;
+        const { fingerprint_template, cif } = req.body;
 
         if (!fingerprint_template) {
             return res.status(400).json({
@@ -4797,8 +4798,12 @@ router.post("/biometric/authenticate", async (req, res) => {
             });
         }
 
-        // Get all approved biometrics
-        const approvedBiometrics = await Biometric.find({ status: 'approved' });
+        // Get all approved biometrics (or just the specific CIF if provided)
+        const query = { status: 'approved' };
+        if (cif) {
+            query.cif = cif;
+        }
+        const approvedBiometrics = await Biometric.find(query);
 
         if (approvedBiometrics.length === 0) {
             return res.status(404).json({
@@ -6452,6 +6457,189 @@ router.post("/autopopulate_denomination", auth, roleCheck(["Teller", "Maker", "A
         res.status(500).json({
             error: true,
             message: e.message || "Failed to auto-populate denomination"
+        });
+    }
+});
+
+/**
+ * Generate OTP for customer login
+ * POST /api/zsmart_branch_requests/generate-otp
+ */
+router.post("/generate-otp", async (req, res) => {
+    try {
+        const { account_number } = req.body;
+
+        if (!account_number) {
+            return res.status(400).json({
+                error: true,
+                message: "Account number is required"
+            });
+        }
+
+        // Extract CIF from account number (16-digit account)
+        let cif;
+        if (account_number.length === 16) {
+            const withoutLast3 = account_number.slice(0, -3);
+            cif = withoutLast3.slice(-7);
+        } else {
+            return res.status(400).json({
+                error: true,
+                message: "Invalid account number format"
+            });
+        }
+
+        // Get customer phone number from Flexcube
+        const phoneQuery = `
+            SELECT CUST_MOBILE_NO
+            FROM STTM_CUST_ACCOUNT
+            WHERE FORACID = :account_number
+        `;
+
+        const phoneResult = await executeQuery(phoneQuery, { account_number });
+
+        if (!phoneResult || phoneResult.length === 0 || !phoneResult[0].CUST_MOBILE_NO) {
+            return res.status(404).json({
+                error: true,
+                message: "Phone number not found for this account"
+            });
+        }
+
+        const phoneNumber = phoneResult[0].CUST_MOBILE_NO.trim();
+
+        // Generate 6-digit OTP
+        const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+
+        // Delete any existing OTPs for this CIF
+        await OTP.deleteMany({ cif });
+
+        // Save new OTP
+        const newOTP = new OTP({
+            cif,
+            account_number,
+            phone_number: phoneNumber,
+            otp_code: otpCode
+        });
+
+        await newOTP.save();
+
+        // Send OTP via SMS
+        const smsContent = `Your Smart Branch login OTP is: ${otpCode}. This code will expire in 3 minutes. Do not share this code with anyone.`;
+        const encodedContent = encodeURIComponent(smsContent);
+        const smsUrl = `https://smsgateway.zemenbank.com/http-api/send?username=smartbranch&password=Y8z6pTB80l6%234siD&to=${phoneNumber}&from=8011&coding=8&content=${encodedContent}`;
+
+        try {
+            const response = await fetch(smsUrl);
+            if (!response.ok) {
+                console.error("SMS sending failed:", await response.text());
+            }
+        } catch (smsError) {
+            console.error("SMS sending error:", smsError);
+        }
+
+        // Mask phone number for response (show only last 4 digits)
+        const maskedPhone = phoneNumber.replace(/(\d{3})(\d+)(\d{4})/, '$1****$3');
+
+        res.json({
+            error: false,
+            message: "OTP sent successfully",
+            data: {
+                maskedPhone,
+                expiresIn: 180 // seconds
+            }
+        });
+
+    } catch (e) {
+        console.error("[GENERATE_OTP] Error:", e);
+        res.status(500).json({
+            error: true,
+            message: e.message || "Failed to generate OTP"
+        });
+    }
+});
+
+/**
+ * Verify OTP for customer login
+ * POST /api/zsmart_branch_requests/verify-otp
+ */
+router.post("/verify-otp", async (req, res) => {
+    try {
+        const { account_number, otp_code } = req.body;
+
+        if (!account_number || !otp_code) {
+            return res.status(400).json({
+                error: true,
+                message: "Account number and OTP code are required"
+            });
+        }
+
+        // Extract CIF from account number
+        let cif;
+        if (account_number.length === 16) {
+            const withoutLast3 = account_number.slice(0, -3);
+            cif = withoutLast3.slice(-7);
+        } else {
+            return res.status(400).json({
+                error: true,
+                message: "Invalid account number format"
+            });
+        }
+
+        // Find the OTP record
+        const otpRecord = await OTP.findOne({
+            cif,
+            account_number,
+            verified: false
+        }).sort({ created_at: -1 });
+
+        if (!otpRecord) {
+            return res.status(404).json({
+                error: true,
+                message: "OTP not found or expired. Please request a new OTP."
+            });
+        }
+
+        // Check if max attempts exceeded
+        if (otpRecord.attempts >= otpRecord.max_attempts) {
+            await OTP.deleteOne({ _id: otpRecord._id });
+            return res.status(400).json({
+                error: true,
+                message: "Maximum OTP attempts exceeded. Please request a new OTP."
+            });
+        }
+
+        // Verify OTP
+        if (otpRecord.otp_code !== otp_code.trim()) {
+            // Increment attempts
+            otpRecord.attempts += 1;
+            await otpRecord.save();
+
+            const remainingAttempts = otpRecord.max_attempts - otpRecord.attempts;
+
+            return res.status(400).json({
+                error: true,
+                message: `Invalid OTP. ${remainingAttempts} attempt(s) remaining.`
+            });
+        }
+
+        // OTP is correct - mark as verified and delete
+        otpRecord.verified = true;
+        await otpRecord.save();
+        await OTP.deleteOne({ _id: otpRecord._id });
+
+        res.json({
+            error: false,
+            message: "OTP verified successfully",
+            data: {
+                cif,
+                account_number
+            }
+        });
+
+    } catch (e) {
+        console.error("[VERIFY_OTP] Error:", e);
+        res.status(500).json({
+            error: true,
+            message: e.message || "Failed to verify OTP"
         });
     }
 });
