@@ -1597,6 +1597,7 @@ router.get("/transactions", auth, roleCheck(["Teller", "Authorizer", "Maker", "A
         // Fetch data from all models based on the search query
         const deposits = await Deposit.find(searchQuery);
         const withdraws = await Withdraw.find(searchQuery);
+        const echecks = await ECheck.find(searchQuery);
         const transfers = await Transfer.find(searchQuery);
         const otherBankTransfers = await Other_Bank_Transfer.find(searchQuery);
         const airTicketPayments = await Air_Ticket_Payment.find(searchQuery);
@@ -1604,6 +1605,7 @@ router.get("/transactions", auth, roleCheck(["Teller", "Authorizer", "Maker", "A
         // Combine all transactions
         let transactions = [
             ...withdraws,
+            ...echecks,
             ...deposits,
             ...transfers,
             ...otherBankTransfers,
@@ -3682,19 +3684,22 @@ router.get("/branch_transactions", auth, async(req, res, next) => {
         const queryCondition = isBranchManagement ? {} : (isTellerOrMaker ? { assigned_to: user.user } : { branch: user.branch });
 
         // Fetch all transactions based on the query condition
-        const [deposits, withdraws, transfers, otherBankTransfers, airTicketPayments] = await Promise.all([
+        const [deposits, withdraws, echecks, transfers, otherBankTransfers, airTicketPayments] = await Promise.all([
             Deposit.find(queryCondition)
                 .sort({ request_date: -1 }),
-            
+
             Withdraw.find(queryCondition)
                 .sort({ request_date: -1 }),
-            
+
+            ECheck.find(queryCondition)
+                .sort({ request_date: -1 }),
+
             Transfer.find(queryCondition)
                 .sort({ request_date: -1 }),
-            
+
             Other_Bank_Transfer.find(queryCondition)
                 .sort({ request_date: -1 }),
-            
+
             Air_Ticket_Payment.find(queryCondition)
                 .sort({ request_date: -1 })
         ]);
@@ -3708,6 +3713,10 @@ router.get("/branch_transactions", auth, async(req, res, next) => {
             ...withdraws.map(t => ({
                 ...t.toObject(),
                 transactionType: 'withdraw'
+            })),
+            ...echecks.map(t => ({
+                ...t.toObject(),
+                transactionType: 'echeck'
             })),
             ...transfers.map(t => ({
                 ...t.toObject(),
@@ -3781,6 +3790,7 @@ router.get("/branch_transactions", auth, async(req, res, next) => {
             byType: {
                 deposits: deposits.length,
                 withdraws: withdraws.length,
+                echecks: echecks.length,
                 transfers: transfers.length,
                 otherBankTransfers: otherBankTransfers.length,
                 airTicketPayments: airTicketPayments.length
@@ -5965,16 +5975,18 @@ router.get("/pending-checker-transactions", auth, async (req, res) => {
             query.branch = branch;
         }
 
-        // Get pending deposits and withdrawals
-        const [pendingDeposits, pendingWithdraws] = await Promise.all([
+        // Get pending deposits, withdrawals, and echecks
+        const [pendingDeposits, pendingWithdraws, pendingEChecks] = await Promise.all([
             Deposit.find(query).sort({ posted_date: -1 }),
-            Withdraw.find(query).sort({ posted_date: -1 })
+            Withdraw.find(query).sort({ posted_date: -1 }),
+            ECheck.find(query).sort({ posted_date: -1 })
         ]);
 
         // Combine and add type field
         const pendingTransactions = [
             ...pendingDeposits.map(d => ({ ...d.toObject(), transaction_type: 'Deposit' })),
-            ...pendingWithdraws.map(w => ({ ...w.toObject(), transaction_type: 'Withdraw' }))
+            ...pendingWithdraws.map(w => ({ ...w.toObject(), transaction_type: 'Withdraw' })),
+            ...pendingEChecks.map(e => ({ ...e.toObject(), transaction_type: 'ECheck' }))
         ].sort((a, b) => new Date(b.posted_date) - new Date(a.posted_date));
 
         res.status(200).json({
@@ -6025,6 +6037,8 @@ router.post("/approve-pending-transaction", auth, async (req, res) => {
             transaction = await Deposit.findById(transaction_id);
         } else if (transaction_type === 'Withdraw') {
             transaction = await Withdraw.findById(transaction_id);
+        } else if (transaction_type === 'ECheck') {
+            transaction = await ECheck.findById(transaction_id);
         } else {
             return res.status(400).json({
                 error: true,
