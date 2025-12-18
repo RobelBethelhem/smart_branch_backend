@@ -6490,21 +6490,27 @@ router.post("/generate-otp", async (req, res) => {
 
         // Get customer phone number from Flexcube
         const phoneQuery = `
-            SELECT CUST_MOBILE_NO
-            FROM STTM_CUST_ACCOUNT
-            WHERE FORACID = :account_number
+            SELECT MOBILE_NUMBER as TELEPHONE
+            FROM FCUBSPRD.sttm_cust_personal
+            WHERE CUSTOMER_NO = :1
         `;
 
-        const phoneResult = await executeQuery(phoneQuery, { account_number });
+        const phoneResult = await executeQuery(phoneQuery, [cif]);
 
-        if (!phoneResult || phoneResult.length === 0 || !phoneResult[0].CUST_MOBILE_NO) {
+        console.log("phoneResult", phoneResult);
+
+        if (!phoneResult.success || !phoneResult.data || phoneResult.data.length === 0 || !phoneResult.data[0].TELEPHONE) {
             return res.status(404).json({
                 error: true,
                 message: "Phone number not found for this account"
             });
         }
 
-        const phoneNumber = phoneResult[0].CUST_MOBILE_NO.trim();
+        let phoneNumber = phoneResult.data[0].TELEPHONE;
+        console.log("phoneNumber", phoneNumber);
+
+        // Format phone number if needed (remove +, ensure 251 prefix)
+        phoneNumber = phoneNumber.replace('+', '').replace(/^0/, '251');
 
         // Generate 6-digit OTP
         const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
