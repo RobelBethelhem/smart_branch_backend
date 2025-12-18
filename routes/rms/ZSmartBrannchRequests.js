@@ -4789,7 +4789,7 @@ router.get("/biometric/customer/:cif", auth, roleCheck(["Teller", "Maker"]), asy
 // Uses ZK SDK's fast 1:N DBIdentify for efficient matching (~50,000+ templates/second)
 router.post("/biometric/authenticate", async (req, res) => {
     try {
-        const { fingerprint_template, cif } = req.body;
+        const { fingerprint_template, cif: requestedCif } = req.body;
 
         if (!fingerprint_template) {
             return res.status(400).json({
@@ -4800,8 +4800,8 @@ router.post("/biometric/authenticate", async (req, res) => {
 
         // Get all approved biometrics (or just the specific CIF if provided)
         const query = { status: 'approved' };
-        if (cif) {
-            query.cif = cif;
+        if (requestedCif) {
+            query.cif = requestedCif;
         }
         const approvedBiometrics = await Biometric.find(query);
 
