@@ -553,6 +553,7 @@ router.post("/transaction_reassigned", auth, roleCheck(["Admin", "Authorizer"]),
                     Model = Withdraw;
                     break;
                 case "echeck":
+                case "e-check":  // Handle both old and new format
                     Model = ECheck;
                     break;
                 case "deposit":
@@ -1847,6 +1848,7 @@ router.post("/assigned_to_me", auth, roleCheck(["Teller", "Maker"]), async(req, 
                     Model = Withdraw;
                     break;
                 case 'echeck':
+                case 'e-check':  // Handle both old and new format
                     Model = ECheck;
                     break;
                 case 'transfer':
@@ -6057,7 +6059,7 @@ router.post("/approve-pending-transaction", auth, async (req, res) => {
             transaction = await Deposit.findById(transaction_id);
         } else if (transaction_type === 'Withdraw') {
             transaction = await Withdraw.findById(transaction_id);
-        } else if (transaction_type === 'ECheck') {
+        } else if (transaction_type === 'ECheck' || transaction_type === 'E-Check') {
             transaction = await ECheck.findById(transaction_id);
         } else {
             return res.status(400).json({
