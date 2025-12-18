@@ -552,6 +552,9 @@ router.post("/transaction_reassigned", auth, roleCheck(["Admin", "Authorizer"]),
                 case "withdraw":
                     Model = Withdraw;
                     break;
+                case "echeck":
+                    Model = ECheck;
+                    break;
                 case "deposit":
                     Model = Deposit;
                     break;
@@ -630,32 +633,38 @@ router.get("/get_assigned_transaction_per_brnach", auth, roleCheck(["Admin", "Au
         };
 
         // Fetch transactions from all models
-        const [deposits, withdraws, transfers, otherBankTransfers, airTicketPayments] = await Promise.all([
-            Deposit.find({ 
+        const [deposits, withdraws, echecks, transfers, otherBankTransfers, airTicketPayments] = await Promise.all([
+            Deposit.find({
                 branch: user.branch,
                 status: "assigned",
                 ...dateFilter
             }).sort({ request_date: -1 }),
-            
-            Withdraw.find({ 
+
+            Withdraw.find({
                 branch: user.branch,
                 status: "assigned",
                 ...dateFilter
             }).sort({ request_date: -1 }),
-            
-            Transfer.find({ 
+
+            ECheck.find({
                 branch: user.branch,
                 status: "assigned",
                 ...dateFilter
             }).sort({ request_date: -1 }),
-            
-            Other_Bank_Transfer.find({ 
+
+            Transfer.find({
                 branch: user.branch,
                 status: "assigned",
                 ...dateFilter
             }).sort({ request_date: -1 }),
-            
-            Air_Ticket_Payment.find({ 
+
+            Other_Bank_Transfer.find({
+                branch: user.branch,
+                status: "assigned",
+                ...dateFilter
+            }).sort({ request_date: -1 }),
+
+            Air_Ticket_Payment.find({
                 branch: user.branch,
                 status: "assigned",
                 ...dateFilter
@@ -671,6 +680,10 @@ router.get("/get_assigned_transaction_per_brnach", auth, roleCheck(["Admin", "Au
             ...withdraws.map(t => ({
                 ...t.toObject(),
                 transactionType: 'withdraw'
+            })),
+            ...echecks.map(t => ({
+                ...t.toObject(),
+                transactionType: 'echeck'
             })),
             ...transfers.map(t => ({
                 ...t.toObject(),
@@ -1833,6 +1846,9 @@ router.post("/assigned_to_me", auth, roleCheck(["Teller", "Maker"]), async(req, 
                 case 'withdraw':
                     Model = Withdraw;
                     break;
+                case 'echeck':
+                    Model = ECheck;
+                    break;
                 case 'transfer':
                     Model = Transfer;
                     break;
@@ -1963,6 +1979,10 @@ router.post("/transaction_posted", auth, roleCheck(["Teller"]), async(req, res, 
             Model = Withdraw;
             transaction = await Withdraw.findById(transaction_id);
             txnTrnCode = 'CWL';
+        } else if (await ECheck.exists({ _id: transaction_id })) {
+            Model = ECheck;
+            transaction = await ECheck.findById(transaction_id);
+            txnTrnCode = 'CWL'; // E-Check uses same SOAP as withdraw
         } else if (await Other_Bank_Transfer.exists({ _id: transaction_id })) {
             Model = Other_Bank_Transfer;
             transaction = await Other_Bank_Transfer.findById(transaction_id);
