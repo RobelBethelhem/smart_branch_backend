@@ -215,7 +215,7 @@ const eCheckSchema = new Schema({
     request_type: {
         type: String,
         required: true,
-        default: 'E-Check',
+        default: 'ECheck',
     },
     request_date: {
         type: Date,
