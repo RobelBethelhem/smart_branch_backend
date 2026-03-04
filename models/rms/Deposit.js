@@ -302,7 +302,7 @@ depositSchema.statics.calculateDenominationTotal = function (denomination) {
 // Index for faster queries
 depositSchema.index({ customer_cif: 1 });
 depositSchema.index({ status: 1 });
-depositSchema.index({ xref: 1 });
+// Index on xref already created by unique: true in schema definition
 depositSchema.index({ account_number: 1, request_date: -1 });
 
 const Deposit = mongoose.model('Deposit', depositSchema);

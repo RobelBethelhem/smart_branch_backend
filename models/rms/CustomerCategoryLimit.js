@@ -53,8 +53,7 @@ const customerCategoryLimitSchema = new Schema({
     },
 });
 
-// Index for faster lookup
-customerCategoryLimitSchema.index({ customer_category: 1 });
+// Index on customer_category already created by unique: true in schema definition
 customerCategoryLimitSchema.index({ is_active: 1 });
 
 // Update the updated_at field before saving

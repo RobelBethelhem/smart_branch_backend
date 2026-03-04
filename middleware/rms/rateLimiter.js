@@ -7,7 +7,6 @@ export const otpLimiter = rateLimit({
     message: { error: true, message: 'Too many OTP requests. Please try again later.' },
     standardHeaders: true,
     legacyHeaders: false,
-    keyGenerator: (req) => req.ip,
 });
 
 // OTP verification rate limiter - 5 attempts per IP per 15 minutes
@@ -17,7 +16,6 @@ export const otpVerifyLimiter = rateLimit({
     message: { error: true, message: 'Too many verification attempts. Please try again later.' },
     standardHeaders: true,
     legacyHeaders: false,
-    keyGenerator: (req) => req.ip,
 });
 
 // Search rate limiter - 30 requests per IP per minute
@@ -27,7 +25,6 @@ export const searchLimiter = rateLimit({
     message: { error: true, message: 'Too many search requests. Please slow down.' },
     standardHeaders: true,
     legacyHeaders: false,
-    keyGenerator: (req) => req.ip,
 });
 
 // General API rate limiter - 100 requests per IP per minute
@@ -37,5 +34,4 @@ export const generalLimiter = rateLimit({
     message: { error: true, message: 'Too many requests. Please try again later.' },
     standardHeaders: true,
     legacyHeaders: false,
-    keyGenerator: (req) => req.ip,
 });

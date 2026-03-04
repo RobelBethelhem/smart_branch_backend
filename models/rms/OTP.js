@@ -49,8 +49,7 @@ const otpSchema = new Schema({
     timestamps: true
 });
 
-// Index for automatic cleanup
-otpSchema.index({ created_at: 1 }, { expireAfterSeconds: 180 });
+// TTL index already created by expires: 180 in schema definition
 
 const OTP = mongoose.model('OTP', otpSchema);
 

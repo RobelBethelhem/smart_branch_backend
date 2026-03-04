@@ -238,7 +238,7 @@ transferSchema.statics.generateXref = async function () {
 transferSchema.index({ customer_cif: 1 });
 transferSchema.index({ beneficiary_cif: 1 });
 transferSchema.index({ status: 1 });
-transferSchema.index({ xref: 1 });
+// Index on xref already created by unique: true in schema definition
 transferSchema.index({ account_number: 1, request_date: -1 });
 
 const Transfer = mongoose.model('Transfer', transferSchema);

@@ -353,7 +353,7 @@ withdrawSchema.statics.autopopulateDenomination = function (amount) {
 // Index for faster queries
 withdrawSchema.index({ customer_cif: 1 });
 withdrawSchema.index({ status: 1 });
-withdrawSchema.index({ xref: 1 });
+// Index on xref already created by unique: true in schema definition
 withdrawSchema.index({ account_number: 1, request_date: -1 });
 
 const Withdraw = mongoose.model('Withdraw', withdrawSchema);

@@ -363,7 +363,7 @@ eCheckSchema.statics.autopopulateDenomination = function (amount) {
 // Index for faster queries
 eCheckSchema.index({ customer_cif: 1 });
 eCheckSchema.index({ status: 1 });
-eCheckSchema.index({ xref: 1 });
+// Index on xref already created by unique: true in schema definition
 eCheckSchema.index({ account_number: 1, request_date: -1 });
 
 const ECheck = mongoose.model('ECheck', eCheckSchema);
