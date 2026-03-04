@@ -130,6 +130,7 @@ const transferSchema = new Schema({
     Customer_Unique_Number: {
         type: String,
         required: true,
+        unique: true,
         trim: true,
     },
     request_date: {

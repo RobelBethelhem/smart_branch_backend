@@ -180,6 +180,33 @@ async function identifyFingerprint(queryTemplate, biometrics) {
 
 
 
+/**
+ * Generate a unique Customer_Unique_Number server-side.
+ * Format: 8-character alphanumeric (uppercase hex) using crypto.
+ * Checks all transaction collections for collisions before returning.
+ * Retries up to 10 times if a collision is found.
+ */
+async function generateUniqueCustomerNumber() {
+    const MAX_RETRIES = 10;
+    for (let i = 0; i < MAX_RETRIES; i++) {
+        const num = crypto.randomBytes(4).toString('hex').toUpperCase(); // 8-char hex
+        // Check all collections for duplicates
+        const [dep, wit, trn, obt, eck, atp] = await Promise.all([
+            Deposit.findOne({ Customer_Unique_Number: num }).lean(),
+            Withdraw.findOne({ Customer_Unique_Number: num }).lean(),
+            Transfer.findOne({ Customer_Unique_Number: num }).lean(),
+            Other_Bank_Transfer.findOne({ Customer_Unique_Number: num }).lean(),
+            ECheck.findOne({ Customer_Unique_Number: num }).lean(),
+            Air_Ticket_Payment.findOne({ Customer_Unique_Number: num }).lean(),
+        ]);
+        if (!dep && !wit && !trn && !obt && !eck && !atp) {
+            return num;
+        }
+    }
+    // Fallback: timestamp-based to guarantee uniqueness
+    return crypto.randomBytes(4).toString('hex').toUpperCase() + Date.now().toString(36).slice(-4).toUpperCase();
+}
+
 const router = Router();
 
 
@@ -817,10 +844,12 @@ router.post("/deposit", async(req, res, next) => {
             deposited_by,
             depositor_address,
             account_type,
-            Customer_Unique_Number,
             system,
             branch
         } = req.body;
+
+        // Generate unique Customer_Unique_Number server-side (ignore client value)
+        const Customer_Unique_Number = await generateUniqueCustomerNumber();
 
         // Server-side input validation
         const amount = parseFloat(amount_in_figures);
@@ -956,7 +985,6 @@ router.post("/deposit", async(req, res, next) => {
 // 2. Withdraw Endpoint
 router.post("/withdraw", async(req, res, next) => {
     try {
-        req.body.Customer_Unique_Number = req.body.reference_number;
         delete req.body.reference_number;
         const {
             acc_holder_name,
@@ -968,10 +996,12 @@ router.post("/withdraw", async(req, res, next) => {
             deposited_by,
             depositor_address,
             account_type,
-            Customer_Unique_Number,
             system,
             branch
         } = req.body;
+
+        // Generate unique Customer_Unique_Number server-side (ignore client value)
+        const Customer_Unique_Number = await generateUniqueCustomerNumber();
 
         // Server-side input validation
         const amount = parseFloat(amount_in_figures);
@@ -1127,7 +1157,6 @@ router.post("/withdraw", async(req, res, next) => {
 // E-Check Endpoint (same as withdraw + recipient information)
 router.post("/echeck", async(req, res, next) => {
     try {
-        req.body.Customer_Unique_Number = req.body.reference_number;
         delete req.body.reference_number;
         const {
             acc_holder_name,
@@ -1141,10 +1170,12 @@ router.post("/echeck", async(req, res, next) => {
             deposited_by,
             depositor_address,
             account_type,
-            Customer_Unique_Number,
             system,
             branch
         } = req.body;
+
+        // Generate unique Customer_Unique_Number server-side (ignore client value)
+        const Customer_Unique_Number = await generateUniqueCustomerNumber();
 
         // Validate recipient information
         if (!recipient_full_name || !recipient_phone_number) {
@@ -1296,10 +1327,12 @@ router.post("/transfer", async(req, res, next) => {
             beneficiary_name,
             payment_narration,
             account_type,
-            Customer_Unique_Number,
             system,
             branch
         } = req.body;
+
+        // Generate unique Customer_Unique_Number server-side (ignore client value)
+        const Customer_Unique_Number = await generateUniqueCustomerNumber();
 
         // Server-side input validation
         const amount = parseFloat(amount_in_figures);
@@ -1455,10 +1488,12 @@ router.post("/other_bank_transfer", async(req, res, next) => {
             beneficiary_branch,
             beneficiary_name,
             account_type,
-            Customer_Unique_Number,
             system,
             branch
         } = req.body;
+
+        // Generate unique Customer_Unique_Number server-side (ignore client value)
+        const Customer_Unique_Number = await generateUniqueCustomerNumber();
 
         let correctedAccountType;
         switch(account_type.toLowerCase()) {

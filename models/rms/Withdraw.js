@@ -109,6 +109,7 @@ const withdrawSchema = new Schema({
     Customer_Unique_Number: {
         type: String,
         required: true,
+        unique: true,
         trim: true,
     },
 
@@ -440,6 +441,7 @@ const withdrawSchema =  new Schema({
     Customer_Unique_Number:{
         type: String,
         required: true,
+        unique: true,
         trim: true,
     },
     request_type:{
