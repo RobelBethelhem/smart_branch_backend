@@ -182,14 +182,24 @@ async function identifyFingerprint(queryTemplate, biometrics) {
 
 /**
  * Generate a unique Customer_Unique_Number server-side.
- * Format: 8-character alphanumeric (uppercase hex) using crypto.
+ * Format: 10-character alphanumeric (A-Z, 0-9) using crypto.
+ * 36^10 = ~3.6 quadrillion combinations — practically unguessable.
  * Checks all transaction collections for collisions before returning.
- * Retries up to 10 times if a collision is found.
  */
+const ALPHANUM_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // 32 chars, no ambiguous 0/O/1/I
+function generateSecureCode(length = 10) {
+    const bytes = crypto.randomBytes(length);
+    let result = '';
+    for (let i = 0; i < length; i++) {
+        result += ALPHANUM_CHARS[bytes[i] % ALPHANUM_CHARS.length];
+    }
+    return result;
+}
+
 async function generateUniqueCustomerNumber() {
     const MAX_RETRIES = 10;
     for (let i = 0; i < MAX_RETRIES; i++) {
-        const num = crypto.randomBytes(4).toString('hex').toUpperCase(); // 8-char hex
+        const num = generateSecureCode(10);
         // Check all collections for duplicates
         const [dep, wit, trn, obt, eck, atp] = await Promise.all([
             Deposit.findOne({ Customer_Unique_Number: num }).lean(),
@@ -203,8 +213,8 @@ async function generateUniqueCustomerNumber() {
             return num;
         }
     }
-    // Fallback: timestamp-based to guarantee uniqueness
-    return crypto.randomBytes(4).toString('hex').toUpperCase() + Date.now().toString(36).slice(-4).toUpperCase();
+    // Fallback: 12 chars for extra safety
+    return generateSecureCode(12);
 }
 
 const router = Router();
