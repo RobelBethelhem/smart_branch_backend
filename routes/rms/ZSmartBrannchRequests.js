@@ -217,6 +217,22 @@ async function generateUniqueCustomerNumber() {
     return generateSecureCode(12);
 }
 
+/**
+ * Check account available balance from Flexcube Oracle DB.
+ * Returns { success, balance } or { success: false, error }.
+ */
+async function getAccountBalance(accountNumber) {
+    const query = `
+        SELECT AB.ACY_WITHDRAWABLE_BAL AS AVAILABLE_BALANCE
+        FROM fcubsprd.STTM_ACCOUNT_BALANCE AB
+        WHERE AB.CUST_AC_NO = :1`;
+    const result = await executeQuery(query, [accountNumber]);
+    if (!result.success || !result.data || result.data.length === 0) {
+        return { success: false, error: 'Could not retrieve account balance' };
+    }
+    return { success: true, balance: parseFloat(result.data[0].AVAILABLE_BALANCE) };
+}
+
 const router = Router();
 
 
@@ -1039,6 +1055,21 @@ router.post("/withdraw", async(req, res, next) => {
             });
         }
 
+        // Server-side balance check — reject if amount exceeds available balance
+        const balanceCheck = await getAccountBalance(account_number);
+        if (balanceCheck.success && amount > balanceCheck.balance) {
+            return res.status(400).json({
+                error: true,
+                message: "Insufficient balance. The requested amount exceeds your available balance."
+            });
+        }
+        if (!balanceCheck.success) {
+            return res.status(400).json({
+                error: true,
+                message: "Unable to verify account balance. Please try again."
+            });
+        }
+
         let correctedAccountType;
         switch(account_type.toLowerCase()) {
             case 'savings':
@@ -1192,6 +1223,30 @@ router.post("/echeck", async(req, res, next) => {
             return res.status(400).json({
                 error: true,
                 message: "Recipient full name and phone number are required for E-Check"
+            });
+        }
+
+        // Server-side input validation
+        const amount = parseFloat(amount_in_figures);
+        if (!amount_in_figures || isNaN(amount) || amount <= 0) {
+            return res.status(400).json({ error: true, message: "Invalid amount" });
+        }
+        if (!account_number || !/^\d{16}$/.test(account_number.toString().trim())) {
+            return res.status(400).json({ error: true, message: "Invalid account number format" });
+        }
+
+        // Server-side balance check
+        const balanceCheck = await getAccountBalance(account_number);
+        if (balanceCheck.success && amount > balanceCheck.balance) {
+            return res.status(400).json({
+                error: true,
+                message: "Insufficient balance. The requested amount exceeds your available balance."
+            });
+        }
+        if (!balanceCheck.success) {
+            return res.status(400).json({
+                error: true,
+                message: "Unable to verify account balance. Please try again."
             });
         }
 
@@ -1356,6 +1411,21 @@ router.post("/transfer", async(req, res, next) => {
             return res.status(400).json({ error: true, message: "Invalid beneficiary account number format" });
         }
 
+        // Server-side balance check
+        const balanceCheck = await getAccountBalance(account_number);
+        if (balanceCheck.success && amount > balanceCheck.balance) {
+            return res.status(400).json({
+                error: true,
+                message: "Insufficient balance. The requested amount exceeds your available balance."
+            });
+        }
+        if (!balanceCheck.success) {
+            return res.status(400).json({
+                error: true,
+                message: "Unable to verify account balance. Please try again."
+            });
+        }
+
         let correctedAccountType;
         switch(account_type.toLowerCase()) {
             case 'savings':
@@ -1504,6 +1574,28 @@ router.post("/other_bank_transfer", async(req, res, next) => {
 
         // Generate unique Customer_Unique_Number server-side (ignore client value)
         const Customer_Unique_Number = await generateUniqueCustomerNumber();
+
+        // Server-side balance check
+        const amount = parseFloat(amount_in_figures);
+        if (!amount_in_figures || isNaN(amount) || amount <= 0) {
+            return res.status(400).json({ error: true, message: "Invalid amount" });
+        }
+        if (!account_number || !/^\d{16}$/.test(account_number.toString().trim())) {
+            return res.status(400).json({ error: true, message: "Invalid account number format" });
+        }
+        const balanceCheck = await getAccountBalance(account_number);
+        if (balanceCheck.success && amount > balanceCheck.balance) {
+            return res.status(400).json({
+                error: true,
+                message: "Insufficient balance. The requested amount exceeds your available balance."
+            });
+        }
+        if (!balanceCheck.success) {
+            return res.status(400).json({
+                error: true,
+                message: "Unable to verify account balance. Please try again."
+            });
+        }
 
         let correctedAccountType;
         switch(account_type.toLowerCase()) {
