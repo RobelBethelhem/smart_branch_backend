@@ -7,6 +7,8 @@ import UsedToken from "../../models/rms/UsedToken.js";
 import jwt from "jsonwebtoken";
 import Site from "../../models/rms/Site.js";
 import mongoose from 'mongoose';
+import auth from "../../middleware/rms/auth.js";
+import roleCheck from "../../middleware/rms/roleCheck.js";
 
 
 const router = Router();
@@ -35,8 +37,8 @@ router.post("/verify-token", async(req,res)=>{
     }
 })
 
-router.post("/signUp", async(req,res)=>{
-    try{  
+router.post("/signUp", auth, roleCheck(["Admin", "Super_Admin"]), async(req,res)=>{
+    try{
         delete req.body.id;
         req.body.password = "@Test1234";
         req.body.roles = [req.body.roles]
@@ -58,7 +60,6 @@ router.post("/signUp", async(req,res)=>{
 
 
 
-        console.log("hhhhhhhhhhh", req.body);
         const {error} = signUpBodyValidation(req.body);
         if(error)
             return res.status(400).json({error:true, message:error.details[0].message});
@@ -97,9 +98,7 @@ router.post("/signUp", async(req,res)=>{
 //login
 router.post("/login", async(req,res)=>{
     try{
-        console.log("RRRRReq.bodyiii", req.body)
         const {error} = loginBodyValidation(req.body);
-        console.log("Error: ", error);
         if(error)
             return res.status(400).json({error: true, message: error.details[0].message})
         const user = await User.findOne({email: req.body.email});
@@ -127,7 +126,7 @@ router.post("/login", async(req,res)=>{
     
 
 
-router.get("/getUsers", async(req,res)=>{
+router.get("/getUsers", auth, roleCheck(["Admin", "Super_Admin"]), async(req,res)=>{
     try{
        
         const sendUsers = {};
@@ -163,7 +162,7 @@ router.get("/getUsers", async(req,res)=>{
 
 
 // editing the user
-router.patch("/editUser", async(req,res)=>{
+router.patch("/editUser", auth, roleCheck(["Admin", "Super_Admin"]), async(req,res)=>{
     try{
         const {id, name, email, roles} = req.body;
       
@@ -187,7 +186,7 @@ router.patch("/editUser", async(req,res)=>{
 
 
 
-router.delete("/deleteUser", async(req,res)=>{
+router.delete("/deleteUser", auth, roleCheck(["Admin", "Super_Admin"]), async(req,res)=>{
     try{
         const userId = req.body.id;
         const deletedUser = await User.findByIdAndDelete(userId)

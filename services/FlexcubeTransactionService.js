@@ -213,13 +213,11 @@ export async function checkWithdrawalLimit(accountNumber, withdrawAmount) {
     // 1. Get customer category from Flexcube
     const categoryResult = await getCustomerCategory(cif);
     if (!categoryResult.success) {
-        // If we can't get category, we might want to allow the transaction
-        // or block it - configurable behavior
-        console.warn('Could not fetch customer category:', categoryResult.error);
+        console.warn('Could not fetch customer category - blocking for safety');
         return {
-            allowed: true,
-            reason: 'Customer category lookup failed - proceeding without limit check',
-            details: { cif, error: categoryResult.error },
+            allowed: false,
+            reason: 'Customer verification failed - transaction blocked for safety',
+            details: { cif },
             category: null,
             dailyLimit: null,
             dailyWithdrawn: null,
@@ -233,9 +231,9 @@ export async function checkWithdrawalLimit(accountNumber, withdrawAmount) {
     const limitResult = await getCategoryDailyLimit(customerCategory);
     if (!limitResult.success) {
         return {
-            allowed: true,
-            reason: 'Limit configuration lookup failed - proceeding without limit check',
-            details: { cif, category: customerCategory, error: limitResult.error },
+            allowed: false,
+            reason: 'Limit verification failed - transaction blocked for safety',
+            details: { cif, category: customerCategory },
             category: customerCategory,
             dailyLimit: null,
             dailyWithdrawn: null,
@@ -261,12 +259,11 @@ export async function checkWithdrawalLimit(accountNumber, withdrawAmount) {
     // 3. Get today's total withdrawal from Flexcube
     const withdrawalResult = await getDailyWithdrawalTotal(cif);
     if (!withdrawalResult.success) {
-        console.warn('Could not fetch daily withdrawal total:', withdrawalResult.error);
-        // Proceed with caution - might want to block in production
+        console.warn('Could not fetch daily withdrawal total - blocking for safety');
         return {
-            allowed: true,
-            reason: 'Daily withdrawal lookup failed - proceeding without limit check',
-            details: { cif, category: customerCategory, dailyLimit, error: withdrawalResult.error },
+            allowed: false,
+            reason: 'Daily withdrawal check failed - transaction blocked for safety',
+            details: { cif, category: customerCategory, dailyLimit },
             category: customerCategory,
             dailyLimit: dailyLimit,
             dailyWithdrawn: null,

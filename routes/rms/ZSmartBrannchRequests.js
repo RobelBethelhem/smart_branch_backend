@@ -21,6 +21,8 @@ import { fileURLToPath } from 'url';
 import * as FlexcubeTransactionService from '../../services/FlexcubeTransactionService.js';
 import CustomerCategoryLimit from '../../models/rms/CustomerCategoryLimit.js';
 import MakerCheckerThreshold from '../../models/rms/MakerCheckerThreshold.js';
+import crypto from 'crypto';
+import { otpLimiter, otpVerifyLimiter } from '../../middleware/rms/rateLimiter.js';
 
 // Fingerprint service paths
 const __filename_fp = fileURLToPath(import.meta.url);
@@ -247,7 +249,7 @@ const router = Router();
 //                     { $set: assignmentDetails }
 //                 );
 //             } catch (assignError) {
-//                 console.error("Auto-assignment failed:", assignError);
+//                 console.error("[AUTO_ASSIGNMENT] Failed:", assignError.message);
 //                 // Continue with creation even if assignment fails
 //             }
 //         }
@@ -593,10 +595,10 @@ router.post("/transaction_reassigned", auth, roleCheck(["Admin", "Authorizer"]),
             message: "Transactions reassigned successfully" 
         });
     } catch (e) {
-        console.log(e);
+        console.error("[TRANSACTION_REASSIGN] Error:", e.message);
         return res.status(500).json({
-            error: true, 
-            message: "An error occurred while processing the request." 
+            error: true,
+            message: "An error occurred while processing the request."
         });
     }
 });
@@ -780,10 +782,10 @@ router.get("/get_assigned_transaction_per_brnach", auth, roleCheck(["Admin", "Au
         });
 
     } catch(e) {
-        console.log("Error", e);
-        res.status(500).json({ 
-            error: true, 
-            message: e.message || "Could not retrieve transactions" 
+        console.error("[GET_BRANCH_TRANSACTIONS] Error:", e.message);
+        res.status(500).json({
+            error: true,
+            message: "Could not retrieve transactions"
         });
     }
 });
@@ -810,7 +812,7 @@ router.post("/deposit", async(req, res, next) => {
             amount_in_words,
             amount_in_figures,
             source_of_funds,
-            signature, 
+            signature,
             account_number,
             deposited_by,
             depositor_address,
@@ -820,7 +822,14 @@ router.post("/deposit", async(req, res, next) => {
             branch
         } = req.body;
 
-        console.log("req.body", req.body)
+        // Server-side input validation
+        const amount = parseFloat(amount_in_figures);
+        if (!amount_in_figures || isNaN(amount) || amount <= 0) {
+            return res.status(400).json({ error: true, message: "Invalid amount" });
+        }
+        if (!account_number || !/^\d{16}$/.test(account_number.toString().trim())) {
+            return res.status(400).json({ error: true, message: "Invalid account number format" });
+        }
 
         let correctedAccountType;
         switch(account_type.toLowerCase()) {
@@ -865,7 +874,7 @@ router.post("/deposit", async(req, res, next) => {
                     ...assignmentDetails
                 };
             } catch (assignError) {
-                console.error("Auto-assignment failed:", assignError);
+                console.error("[AUTO_ASSIGNMENT] Failed:", assignError.message);
                 return res.status(400).json({
                     error: true,
                     message: "Could not auto-assign teller: " + assignError.message
@@ -877,8 +886,6 @@ router.post("/deposit", async(req, res, next) => {
         await newDeposit.save();
         
         const customerNumber = newDeposit.account_number.substring(6, 13);
-        console.log("newDeposit.account_number", newDeposit.account_number);
-        console.log("customerNumber", customerNumber);
 
  const phoneQuery = `
             SELECT MOBILE_NUMBER as telephone 
@@ -886,15 +893,13 @@ router.post("/deposit", async(req, res, next) => {
             WHERE CUSTOMER_NO = :1
         `;
         const phoneResult = await executeQuery(phoneQuery, [customerNumber]);
-        console.log("phoneResult", phoneResult);
         if (phoneResult.success && phoneResult.data?.length > 0) {
             let phoneNumber = phoneResult.data[0].TELEPHONE;
-            console.log("phoneNumberrrrrr", phoneNumber);
 
 
             // Format phone number if needed (remove +, ensure 251 prefix)
             phoneNumber = phoneNumber.replace('+', '').replace(/^0/, '251');
-            
+
 
             // Construct SMS content based on assignment status
             let smsContent = `Dear ${newDeposit.acc_holder_name},\n\nYour unique code is **${newDeposit.Customer_Unique_Number}**.\n\n`;
@@ -918,10 +923,10 @@ router.post("/deposit", async(req, res, next) => {
                 const response = await fetch(smsUrl);
                 
                 if (!response.ok) {
-                    console.error("SMS sending failed:", await response.text());
+                    console.error("[SMS] Sending failed");
                 }
             } catch (smsError) {
-                console.error("SMS sending error:", smsError);
+                console.error("[SMS] Sending error:", smsError.message);
                 // Don't return error to client, just log it
             }
         }
@@ -940,10 +945,10 @@ router.post("/deposit", async(req, res, next) => {
         });
 
     } catch(e) {
-        console.log("Error", e);
-        res.status(400).json({ 
-            error: true, 
-            message: e.message || "Could Not Do the Operation"
+        console.error("[DEPOSIT] Error:", e.message);
+        res.status(400).json({
+            error: true,
+            message: "Could not perform the operation"
         });
     }
 });
@@ -951,8 +956,6 @@ router.post("/deposit", async(req, res, next) => {
 // 2. Withdraw Endpoint
 router.post("/withdraw", async(req, res, next) => {
     try {
-
-        console.log("Withdraw", req.body);
         req.body.Customer_Unique_Number = req.body.reference_number;
         delete req.body.reference_number;
         const {
@@ -960,7 +963,7 @@ router.post("/withdraw", async(req, res, next) => {
             amount_in_words,
             amount_in_figures,
             source_of_funds,
-            signature, 
+            signature,
             account_number,
             deposited_by,
             depositor_address,
@@ -969,6 +972,32 @@ router.post("/withdraw", async(req, res, next) => {
             system,
             branch
         } = req.body;
+
+        // Server-side input validation
+        const amount = parseFloat(amount_in_figures);
+        if (!amount_in_figures || isNaN(amount) || amount <= 0) {
+            return res.status(400).json({ error: true, message: "Invalid amount" });
+        }
+        if (!account_number || !/^\d{16}$/.test(account_number.toString().trim())) {
+            return res.status(400).json({ error: true, message: "Invalid account number format" });
+        }
+
+        // Server-side withdrawal limit check
+        try {
+            const limitCheck = await FlexcubeTransactionService.checkWithdrawalLimit(account_number, amount);
+            if (!limitCheck.allowed) {
+                return res.status(400).json({
+                    error: true,
+                    message: limitCheck.reason || "Withdrawal exceeds allowed limit"
+                });
+            }
+        } catch (limitError) {
+            console.error("[WITHDRAW] Limit check error:", limitError.message);
+            return res.status(400).json({
+                error: true,
+                message: "Unable to verify withdrawal limit. Please try again."
+            });
+        }
 
         let correctedAccountType;
         switch(account_type.toLowerCase()) {
@@ -1014,7 +1043,7 @@ router.post("/withdraw", async(req, res, next) => {
                     ...assignmentDetails
                 };
             } catch (assignError) {
-                console.error("Auto-assignment failed:", assignError);
+                console.error("[AUTO_ASSIGNMENT] Failed:", assignError.message);
                 return res.status(400).json({
                     error: true,
                     message: "Could not auto-assign teller: " + assignError.message
@@ -1028,24 +1057,20 @@ router.post("/withdraw", async(req, res, next) => {
 
 
         const customerNumber = newWithdraw.account_number.substring(6, 13);
-        console.log("newDeposit.account_number", newWithdraw.account_number);
-        console.log("customerNumber", customerNumber);
 
  const phoneQuery = `
-            SELECT MOBILE_NUMBER as telephone 
-            FROM FCUBSPRD.sttm_cust_personal 
+            SELECT MOBILE_NUMBER as telephone
+            FROM FCUBSPRD.sttm_cust_personal
             WHERE CUSTOMER_NO = :1
         `;
         const phoneResult = await executeQuery(phoneQuery, [customerNumber]);
-        console.log("phoneResult", phoneResult);
         if (phoneResult.success && phoneResult.data?.length > 0) {
             let phoneNumber = phoneResult.data[0].TELEPHONE;
-            console.log("phoneNumberrrrrr", phoneNumber);
 
 
             // Format phone number if needed (remove +, ensure 251 prefix)
             phoneNumber = phoneNumber.replace('+', '').replace(/^0/, '251');
-            
+
 
             // Construct SMS content based on assignment status
             let smsContent = `Dear ${newWithdraw.acc_holder_name}.\n\nYour unique code is **${newWithdraw.Customer_Unique_Number}**.\n\n`;
@@ -1069,10 +1094,10 @@ router.post("/withdraw", async(req, res, next) => {
                 const response = await fetch(smsUrl);
                 
                 if (!response.ok) {
-                    console.error("SMS sending failed:", await response.text());
+                    console.error("[SMS] Sending failed");
                 }
             } catch (smsError) {
-                console.error("SMS sending error:", smsError);
+                console.error("[SMS] Sending error:", smsError.message);
                 // Don't return error to client, just log it
             }
         }
@@ -1091,10 +1116,10 @@ router.post("/withdraw", async(req, res, next) => {
         });
 
     } catch(e) {
-        console.log("Error", e);
-        res.status(400).json({ 
-            error: true, 
-            message: e.message || "Could Not Do the Operation"
+        console.error("[WITHDRAW] Error:", e.message);
+        res.status(400).json({
+            error: true,
+            message: "Could not perform the operation"
         });
     }
 });
@@ -1102,7 +1127,6 @@ router.post("/withdraw", async(req, res, next) => {
 // E-Check Endpoint (same as withdraw + recipient information)
 router.post("/echeck", async(req, res, next) => {
     try {
-        console.log("E-Check", req.body);
         req.body.Customer_Unique_Number = req.body.reference_number;
         delete req.body.reference_number;
         const {
@@ -1176,7 +1200,7 @@ router.post("/echeck", async(req, res, next) => {
                     ...assignmentDetails
                 };
             } catch (assignError) {
-                console.error("Auto-assignment failed:", assignError);
+                console.error("[AUTO_ASSIGNMENT] Failed:", assignError.message);
                 return res.status(400).json({
                     error: true,
                     message: "Could not auto-assign teller: " + assignError.message
@@ -1188,8 +1212,6 @@ router.post("/echeck", async(req, res, next) => {
         await newECheck.save();
 
         const customerNumber = newECheck.account_number.substring(6, 13);
-        console.log("newECheck.account_number", newECheck.account_number);
-        console.log("customerNumber", customerNumber);
 
         const phoneQuery = `
             SELECT MOBILE_NUMBER as telephone
@@ -1197,10 +1219,8 @@ router.post("/echeck", async(req, res, next) => {
             WHERE CUSTOMER_NO = :1
         `;
         const phoneResult = await executeQuery(phoneQuery, [customerNumber]);
-        console.log("phoneResult", phoneResult);
         if (phoneResult.success && phoneResult.data?.length > 0) {
             let phoneNumber = phoneResult.data[0].TELEPHONE;
-            console.log("phoneNumber", phoneNumber);
 
             // Format phone number if needed (remove +, ensure 251 prefix)
             phoneNumber = phoneNumber.replace('+', '').replace(/^0/, '251');
@@ -1228,10 +1248,10 @@ router.post("/echeck", async(req, res, next) => {
                 const response = await fetch(smsUrl);
 
                 if (!response.ok) {
-                    console.error("SMS sending failed:", await response.text());
+                    console.error("[SMS] Sending failed");
                 }
             } catch (smsError) {
-                console.error("SMS sending error:", smsError);
+                console.error("[SMS] Sending error:", smsError.message);
                 // Don't return error to client, just log it
             }
         }
@@ -1251,10 +1271,10 @@ router.post("/echeck", async(req, res, next) => {
         });
 
     } catch(e) {
-        console.log("Error", e);
+        console.error("[ECHECK] Error:", e.message);
         res.status(400).json({
             error: true,
-            message: e.message || "Could Not Do the Operation"
+            message: "Could not perform the operation"
         });
     }
 });
@@ -1269,7 +1289,7 @@ router.post("/transfer", async(req, res, next) => {
             amount_in_words,
             amount_in_figures,
             source_of_funds,
-            signature, 
+            signature,
             account_number,
             beneficiary_account_number,
             beneficiary_branch,
@@ -1280,6 +1300,18 @@ router.post("/transfer", async(req, res, next) => {
             system,
             branch
         } = req.body;
+
+        // Server-side input validation
+        const amount = parseFloat(amount_in_figures);
+        if (!amount_in_figures || isNaN(amount) || amount <= 0) {
+            return res.status(400).json({ error: true, message: "Invalid amount" });
+        }
+        if (!account_number || !/^\d{16}$/.test(account_number.toString().trim())) {
+            return res.status(400).json({ error: true, message: "Invalid account number format" });
+        }
+        if (!beneficiary_account_number || !/^\d{16}$/.test(beneficiary_account_number.toString().trim())) {
+            return res.status(400).json({ error: true, message: "Invalid beneficiary account number format" });
+        }
 
         let correctedAccountType;
         switch(account_type.toLowerCase()) {
@@ -1321,7 +1353,7 @@ router.post("/transfer", async(req, res, next) => {
                     ...assignmentDetails
                 };
             } catch (assignError) {
-                console.error("Auto-assignment failed:", assignError);
+                console.error("[AUTO_ASSIGNMENT] Failed:", assignError.message);
                 return res.status(400).json({
                     error: true,
                     message: "Could not auto-assign teller: " + assignError.message
@@ -1336,19 +1368,15 @@ router.post("/transfer", async(req, res, next) => {
 
         
         const customerNumber = newTransfer.account_number.substring(6, 13);
-        console.log("newDeposit.account_number", newTransfer.account_number);
-        console.log("customerNumber", customerNumber);
 
  const phoneQuery = `
-            SELECT MOBILE_NUMBER as telephone 
-            FROM FCUBSPRD.sttm_cust_personal 
+            SELECT MOBILE_NUMBER as telephone
+            FROM FCUBSPRD.sttm_cust_personal
             WHERE CUSTOMER_NO = :1
         `;
         const phoneResult = await executeQuery(phoneQuery, [customerNumber]);
-        console.log("phoneResult", phoneResult);
         if (phoneResult.success && phoneResult.data?.length > 0) {
             let phoneNumber = phoneResult.data[0].TELEPHONE;
-            console.log("phoneNumberrrrrr", phoneNumber);
 
 
             // Format phone number if needed (remove +, ensure 251 prefix)
@@ -1377,10 +1405,10 @@ router.post("/transfer", async(req, res, next) => {
                 const response = await fetch(smsUrl);
                 
                 if (!response.ok) {
-                    console.error("SMS sending failed:", await response.text());
+                    console.error("[SMS] Sending failed");
                 }
             } catch (smsError) {
-                console.error("SMS sending error:", smsError);
+                console.error("[SMS] Sending error:", smsError.message);
                 // Don't return error to client, just log it
             }
         }
@@ -1400,10 +1428,10 @@ router.post("/transfer", async(req, res, next) => {
         });
 
     } catch(e) {
-        console.log("Error", e);
-        res.status(400).json({ 
-            error: true, 
-            message: e.message || "Could Not Do the Operation"
+        console.error("[TRANSFER] Error:", e.message);
+        res.status(400).json({
+            error: true,
+            message: "Could not perform the operation"
         });
     }
 });
@@ -1474,7 +1502,7 @@ router.post("/other_bank_transfer", async(req, res, next) => {
                     ...assignmentDetails
                 };
             } catch (assignError) {
-                console.error("Auto-assignment failed:", assignError);
+                console.error("[AUTO_ASSIGNMENT] Failed:", assignError.message);
                 return res.status(400).json({
                     error: true,
                     message: "Could not auto-assign teller: " + assignError.message
@@ -1487,19 +1515,15 @@ router.post("/other_bank_transfer", async(req, res, next) => {
 
 
         const customerNumber = newOtherBankTransfer.account_number.substring(6, 13);
-        console.log("newDeposit.account_number", newOtherBankTransfer.account_number);
-        console.log("customerNumber", customerNumber);
 
  const phoneQuery = `
-            SELECT MOBILE_NUMBER as telephone 
-            FROM FCUBSPRD.sttm_cust_personal 
+            SELECT MOBILE_NUMBER as telephone
+            FROM FCUBSPRD.sttm_cust_personal
             WHERE CUSTOMER_NO = :1
         `;
         const phoneResult = await executeQuery(phoneQuery, [customerNumber]);
-        console.log("phoneResult", phoneResult);
         if (phoneResult.success && phoneResult.data?.length > 0) {
             let phoneNumber = phoneResult.data[0].TELEPHONE;
-            console.log("phoneNumberrrrrr", phoneNumber);
 
 
             // Format phone number if needed (remove +, ensure 251 prefix)
@@ -1528,10 +1552,10 @@ router.post("/other_bank_transfer", async(req, res, next) => {
                 const response = await fetch(smsUrl);
                 
                 if (!response.ok) {
-                    console.error("SMS sending failed:", await response.text());
+                    console.error("[SMS] Sending failed");
                 }
             } catch (smsError) {
-                console.error("SMS sending error:", smsError);
+                console.error("[SMS] Sending error:", smsError.message);
                 // Don't return error to client, just log it
             }
         }
@@ -1549,10 +1573,10 @@ router.post("/other_bank_transfer", async(req, res, next) => {
         });
 
     } catch(e) {
-        console.log("Error", e);
-        res.status(400).json({ 
-            error: true, 
-            message: e.message || "Could Not Do the Operation"
+        console.error("[OTHER_BANK_TRANSFER] Error:", e.message);
+        res.status(400).json({
+            error: true,
+            message: "Could not perform the operation"
         });
     }
 });
@@ -1679,10 +1703,10 @@ router.get("/transactions", auth, roleCheck(["Teller", "Authorizer", "Maker", "A
         });
 
     } catch (e) {
-        console.log("Error", e);
+        console.error("[TRANSACTIONS] Error:", e.message);
         res.status(500).json({
             error: true,
-            message: e.message || "Could not retrieve transactions"
+            message: "Could not retrieve transactions"
         });
     }
 });
@@ -1812,8 +1836,6 @@ router.get("/transactions", auth, roleCheck(["Teller", "Authorizer", "Maker", "A
 router.post("/assigned_to_me", auth, roleCheck(["Teller", "Maker"]), async(req, res, next) => {
     try {
 
-
-        console.log("Robel Asfaw Bogale", req.body);
         // Get current user
         const user = await User.findById(req.user._id).lean();
         if (!user) {
@@ -1936,10 +1958,10 @@ router.post("/assigned_to_me", auth, roleCheck(["Teller", "Maker"]), async(req, 
         });
 
     } catch(e) {
-        console.log("Error", e);
-        res.status(500).json({ 
-            error: true, 
-            message: e.message || "Could not perform the operation" 
+        console.error("[ASSIGNED_TO_ME] Error:", e.message);
+        res.status(500).json({
+            error: true,
+            message: "Could not perform the operation"
         });
     }
 });
@@ -1955,14 +1977,19 @@ router.post("/transaction_posted", auth, roleCheck(["Teller"]), async(req, res, 
             return res.status(400).json({ error: true, message: "Requester not found" });
         }
 
-        const { transaction_id, trn_ref_no } = req.body;
-        
-        if (!transaction_id || !trn_ref_no) {
-            return res.status(400).json({ 
-                error: true, 
-                message: "Transaction ID and TRN Reference Number are required" 
+        const { transaction_id } = req.body;
+
+        if (!transaction_id) {
+            return res.status(400).json({
+                error: true,
+                message: "Transaction ID is required"
             });
         }
+
+        // Auto-generate unique transaction reference number server-side
+        const datePart = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+        const randomPart = crypto.randomBytes(3).toString('hex').toUpperCase();
+        const trn_ref_no = `${user.branch || 'BR'}-${datePart}-${randomPart}`;
 
         // First find the transaction to get its type and details
         let transaction;
@@ -2068,13 +2095,6 @@ router.post("/transaction_posted", auth, roleCheck(["Teller"]), async(req, res, 
     // ]);
 
 
-        console.log("trn_ref_no", trn_ref_no);
-        console.log("user.flex_id", user.flex_id);
-        console.log("transaction.assigned_date",formattedAssignedDate);
-        console.log("txnTrnCode", txnTrnCode);
-
-        console.log("flexResult", flexResult);
-
         if (!flexResult.success || !flexResult.data?.length) {
             return res.status(400).json({
                 error: true,
@@ -2142,17 +2162,17 @@ router.post("/transaction_posted", auth, roleCheck(["Teller"]), async(req, res, 
         });
 
     } catch(e) {
-        console.log("Error", e);
-        res.status(500).json({ 
-            error: true, 
-            message: e.message || "Could not perform the operation" 
+        console.error("[TRANSACTION_POSTED] Error:", e.message);
+        res.status(500).json({
+            error: true,
+            message: "Could not perform the operation"
         });
     }
 });
 
 
 
-router.put("/edit_smart_branch_request", async(req, res, next) => {
+router.put("/edit_smart_branch_request", auth, async(req, res, next) => {
     try {
         const { 
             amount_in_figures,
@@ -2256,17 +2276,16 @@ router.put("/edit_smart_branch_request", async(req, res, next) => {
         });
 
     } catch (error) {
-        console.error("Error updating transaction:", error);
+        console.error("[EDIT_REQUEST] Error:", error.message);
         return res.status(500).json({
             error: true,
-            message: "Internal Server Error",
-            details: error.message
+            message: "Internal Server Error"
         });
     }
 });
 
 // Delete endpoint
-router.delete("/delete_smart_branch_request", async(req, res, next) => {
+router.delete("/delete_smart_branch_request", auth, async(req, res, next) => {
     try {
         const { Customer_Unique_Number, request_type } = req.body;
 
@@ -2318,17 +2337,16 @@ router.delete("/delete_smart_branch_request", async(req, res, next) => {
         });
 
     } catch (error) {
-        console.error("Error deleting transaction:", error);
+        console.error("[DELETE_REQUEST] Error:", error.message);
         return res.status(500).json({
             error: true,
-            message: "Internal Server Error",
-            details: error.message
+            message: "Internal Server Error"
         });
     }
 });
 
 
-router.post("/get_account_number_by_reference_number", async (req, res, next) => {
+router.post("/get_account_number_by_reference_number", auth, async (req, res, next) => {
     try {
         const { referenceNumber } = req.body;
 
@@ -2399,8 +2417,6 @@ router.post("/get_account_number_by_reference_number", async (req, res, next) =>
                 return baseInfo;
             });
         
-            console.log("responseTransactions", responseTransactions);
-        
             return res.status(200).json({
                 error: false,
                 transactions: responseTransactions
@@ -2415,7 +2431,7 @@ router.post("/get_account_number_by_reference_number", async (req, res, next) =>
 
 
     } catch (e) {
-        console.error("Error retrieving account number:", e);
+        console.error("[GET_ACCOUNT_BY_REF] Error:", e.message);
         return res.status(500).json({
             error: true,
             message: "Internal Server Error"
@@ -2722,10 +2738,10 @@ router.get("/get_assigned_to_me", auth, roleCheck(["Teller", "Maker"]), async(re
         });
 
     } catch(e) {
-        console.log("Error", e);
-        res.status(500).json({ 
-            error: true, 
-            message: e.message || "Could not retrieve transactions" 
+        console.error("[GET_ALL_DATA] Error:", e.message);
+        res.status(500).json({
+            error: true,
+            message: "Could not retrieve transactions"
         });
     }
 });
@@ -2891,10 +2907,10 @@ router.get("/get_posted_data", auth, roleCheck(["Authorizer","Teller"]), async(r
         });
 
     } catch(e) {
-        console.log("Error", e);
-        res.status(500).json({ 
-            error: true, 
-            message: e.message || "Could not retrieve transactions" 
+        console.error("[GET_POSTED_DATA] Error:", e.message);
+        res.status(500).json({
+            error: true,
+            message: "Could not retrieve transactions"
         });
     }
 });
@@ -3066,10 +3082,10 @@ router.get("/get_authorized_data", auth, roleCheck(["Auditor","Teller"]), async(
         });
 
     } catch(e) {
-        console.log("Error", e);
-        res.status(500).json({ 
-            error: true, 
-            message: e.message || "Could not retrieve transactions" 
+        console.error("[GET_AUTHORIZED_DATA] Error:", e.message);
+        res.status(500).json({
+            error: true,
+            message: "Could not retrieve transactions"
         });
     }
 });
@@ -3236,10 +3252,10 @@ router.post("/transaction_authorized", auth, roleCheck(["Teller", "Authorizer"])
         });
 
     } catch(e) {
-        console.log("Error", e);
-        res.status(500).json({ 
-            error: true, 
-            message: e.message || "Could not perform the operation" 
+        console.error("[TRANSACTION_AUTHORIZED] Error:", e.message);
+        res.status(500).json({
+            error: true,
+            message: "Could not perform the operation"
         });
     }
 });
@@ -3401,7 +3417,6 @@ router.post("/transaction_authorized", auth, roleCheck(["Teller", "Authorizer"])
 router.post("/transaction_audited", auth, roleCheck(["Auditor","Teller"]), async(req, res, next) => {
     try {
         // Get current user
-        console.log("req.body", req.body)
         const user = await User.findById(req.user._id).lean();
         if (!user) {
             return res.status(400).json({ error: true, message: "Requester not found" });
@@ -3537,10 +3552,10 @@ router.post("/transaction_audited", auth, roleCheck(["Auditor","Teller"]), async
         });
 
     } catch(e) {
-        console.log("Error", e);
-        res.status(500).json({ 
-            error: true, 
-            message: e.message || "Could not perform the operation" 
+        console.error("[TRANSACTION_AUDITED] Error:", e.message);
+        res.status(500).json({
+            error: true,
+            message: "Could not perform the operation"
         });
     }
 });
@@ -3846,10 +3861,10 @@ router.get("/branch_transactions", auth, async(req, res, next) => {
         res.status(200).json(responseData);
 
     } catch(e) {
-        console.log("Error", e);
-        res.status(500).json({ 
-            error: true, 
-            message: e.message || "Could not retrieve transactions" 
+        console.error("[BRANCH_TRANSACTIONS] Error:", e.message);
+        res.status(500).json({
+            error: true,
+            message: "Could not retrieve transactions"
         });
     }
 });
@@ -3886,10 +3901,10 @@ router.get("/till_id", auth, roleCheck(["Admin"]), async(req, res, next) => {
         });
 
     } catch(e) {
-        console.log("Error", e);
-        res.status(500).json({ 
-            error: true, 
-            message: e.message || "Could not retrieve till IDs" 
+        console.error("[TILL_ID] Error:", e.message);
+        res.status(500).json({
+            error: true,
+            message: "Could not retrieve till IDs"
         });
     }
 })
@@ -3899,8 +3914,6 @@ router.get("/till_id", auth, roleCheck(["Admin"]), async(req, res, next) => {
 
 router.post("/add_teller", auth, roleCheck(["Admin"]), async(req, res, next) => {
     try {
-        console.log("req.body", req.body)
-        
         const { till_id, user, email, role } = req.body;
 
         if (!role || !['Teller', 'Authorizer', 'Auditor', 'Maker', 'Admin'].includes(role)) {
@@ -4040,10 +4053,10 @@ router.post("/add_teller", auth, roleCheck(["Admin"]), async(req, res, next) => 
         });
 
     } catch(e) {
-        console.log("Error", e);
-        res.status(500).json({ 
-            error: true, 
-            message: e.message || "Could not perform the operation" 
+        console.error("[ADD_TELLER] Error:", e.message);
+        res.status(500).json({
+            error: true,
+            message: "Could not perform the operation"
         });
     }
 });
@@ -4158,8 +4171,6 @@ router.get("/get_users_per_branch", auth, roleCheck(["Admin"]), async(req, res, 
 
         const users = await User.find({ branch: branchManager.branch }).lean();
 
-        console.log("users", users)
-
         // Map users similar to getUsers endpoint
         sendUsers.data = users.map((user) => ({
             id: user._id.toString(),
@@ -4175,14 +4186,13 @@ router.get("/get_users_per_branch", auth, roleCheck(["Admin"]), async(req, res, 
 
         meta.totalRowCount = users.length;
         sendUsers.meta = meta;
-        console.log(" sendUsers.meta",  sendUsers.data)
         res.json(sendUsers);
 
     } catch(e) {
-        console.log("Error", e);
-        res.status(500).json({ 
-            error: true, 
-            message: e.message || "Could not perform the operation" 
+        console.error("[GET_USERS] Error:", e.message);
+        res.status(500).json({
+            error: true,
+            message: "Could not perform the operation"
         });
     }
 });
@@ -4222,7 +4232,7 @@ async function getActiveTellerforTheBranch(branch){
     }
 
     catch (error) {
-        console.error("Error in assignTellerBySystem:", error);
+        console.error("[ASSIGN_TELLER_BY_SYSTEM] Error:", error.message);
         throw error;
     }
 
@@ -4310,7 +4320,7 @@ async function assignTellerBySystem(branch) {
             status: 'assigned'
         };
     } catch (error) {
-        console.error("Error in assignTellerBySystem:", error);
+        console.error("[ASSIGN_TELLER_BY_SYSTEM] Error:", error.message);
         throw error;
     }
 }
@@ -4413,7 +4423,7 @@ router.post("/biometric/register", auth, roleCheck(["Teller", "Maker"]), async (
             ? "WARNING: Biometric registered with SIMULATED template. This will NOT work for real authentication. Re-register with scanner connected."
             : "Biometric registration submitted successfully. Pending admin approval.";
 
-        console.log(`Biometric registered for CIF ${cif} - Simulated: ${isSimulated}`);
+        console.log(`[BIOMETRIC_REGISTER] Biometric registered - Simulated: ${isSimulated}`);
 
         res.status(201).json({
             error: false,
@@ -4428,10 +4438,10 @@ router.post("/biometric/register", auth, roleCheck(["Teller", "Maker"]), async (
         });
 
     } catch (e) {
-        console.error("Error registering biometric:", e);
+        console.error("[BIOMETRIC_REGISTER] Error:", e.message);
         res.status(500).json({
             error: true,
-            message: e.message || "Could not register biometric"
+            message: "Could not register biometric"
         });
     }
 });
@@ -4451,10 +4461,10 @@ router.get("/biometric/my_registrations", auth, roleCheck(["Teller", "Maker"]), 
         });
 
     } catch (e) {
-        console.error("Error fetching biometrics:", e);
+        console.error("[BIOMETRIC_MY_REGISTRATIONS] Error:", e.message);
         res.status(500).json({
             error: true,
-            message: e.message || "Could not fetch biometrics"
+            message: "Could not fetch biometrics"
         });
     }
 });
@@ -4474,10 +4484,10 @@ router.get("/biometric/branch_registrations", auth, roleCheck(["Admin"]), async 
         });
 
     } catch (e) {
-        console.error("Error fetching branch biometrics:", e);
+        console.error("[BIOMETRIC_BRANCH_REGISTRATIONS] Error:", e.message);
         res.status(500).json({
             error: true,
-            message: e.message || "Could not fetch branch biometrics"
+            message: "Could not fetch branch biometrics"
         });
     }
 });
@@ -4498,10 +4508,10 @@ router.get("/biometric/pending_approvals", auth, roleCheck(["Admin"]), async (re
         });
 
     } catch (e) {
-        console.error("Error fetching pending biometrics:", e);
+        console.error("[BIOMETRIC_PENDING_APPROVALS] Error:", e.message);
         res.status(500).json({
             error: true,
-            message: e.message || "Could not fetch pending biometrics"
+            message: "Could not fetch pending biometrics"
         });
     }
 });
@@ -4566,10 +4576,10 @@ router.post("/biometric/approve", auth, roleCheck(["Admin"]), async (req, res) =
         });
 
     } catch (e) {
-        console.error("Error approving biometric:", e);
+        console.error("[BIOMETRIC_APPROVE] Error:", e.message);
         res.status(500).json({
             error: true,
-            message: e.message || "Could not approve biometric"
+            message: "Could not approve biometric"
         });
     }
 });
@@ -4634,10 +4644,10 @@ router.post("/biometric/reject", auth, roleCheck(["Admin"]), async (req, res) =>
         });
 
     } catch (e) {
-        console.error("Error rejecting biometric:", e);
+        console.error("[BIOMETRIC_REJECT] Error:", e.message);
         res.status(500).json({
             error: true,
-            message: e.message || "Could not reject biometric"
+            message: "Could not reject biometric"
         });
     }
 });
@@ -4685,10 +4695,10 @@ router.post("/biometric/verify", auth, async (req, res) => {
         });
 
     } catch (e) {
-        console.error("Error verifying biometric:", e);
+        console.error("[BIOMETRIC_VERIFY] Error:", e.message);
         res.status(500).json({
             error: true,
-            message: e.message || "Could not verify biometric"
+            message: "Could not verify biometric"
         });
     }
 });
@@ -4716,10 +4726,10 @@ router.get("/biometric/check/:cif", auth, async (req, res) => {
         });
 
     } catch (e) {
-        console.error("Error checking biometric:", e);
+        console.error("[BIOMETRIC_CHECK] Error:", e.message);
         res.status(500).json({
             error: true,
-            message: e.message || "Could not check biometric"
+            message: "Could not check biometric"
         });
     }
 });
@@ -4776,10 +4786,10 @@ router.get("/biometric/customer/:cif", auth, roleCheck(["Teller", "Maker"]), asy
         });
 
     } catch (e) {
-        console.error("Error fetching customer by CIF:", e);
+        console.error("[BIOMETRIC_CUSTOMER] Error:", e.message);
         res.status(500).json({
             error: true,
-            message: e.message || "Could not fetch customer information"
+            message: "Could not fetch customer information"
         });
     }
 });
@@ -4812,8 +4822,6 @@ router.post("/biometric/authenticate", async (req, res) => {
             });
         }
 
-        console.log(`Fast 1:N identification against ${approvedBiometrics.length} registered templates...`);
-
         // Use fast 1:N identification instead of looping through 1:1 verifications
         let matchedBiometric = null;
         let matchScore = 0;
@@ -4822,40 +4830,31 @@ router.post("/biometric/authenticate", async (req, res) => {
 
         try {
             const identifyResult = await identifyFingerprint(fingerprint_template, approvedBiometrics);
-            console.log('Identify result:', JSON.stringify(identifyResult));
 
             if (identifyResult.success && identifyResult.found && identifyResult.cif) {
                 // Find the matched biometric record
                 matchedBiometric = approvedBiometrics.find(b => b.cif === identifyResult.cif);
                 matchScore = identifyResult.score || 0;
                 isSimulatedMatch = identifyResult.simulated || false;
-                const matchType = isSimulatedMatch ? '[SIMULATED]' : '[REAL]';
-                console.log(`${matchType} Match found! CIF: ${identifyResult.cif}, Score: ${matchScore}, Time: ${identifyResult.total_time_ms}ms`);
             } else if (!identifyResult.success) {
                 // SDK failed, fall back to 1:1 verification
-                console.log('SDK identify failed:', identifyResult.message, '- falling back to 1:1 verification');
                 throw new Error(identifyResult.message || 'SDK identify failed');
-            } else {
-                console.log(`No match found. Database size: ${identifyResult.database_size}, Simulated: ${identifyResult.simulated}, Time: ${identifyResult.total_time_ms}ms`);
             }
         } catch (identifyError) {
-            console.error('Fast identification failed, falling back to 1:1 verification:', identifyError.message);
+            console.error('[BIOMETRIC_AUTHENTICATE] Fast identification failed, falling back to 1:1 verification:', identifyError.message);
 
             // Fallback to 1:1 verification loop if fast identification fails
             for (const biometric of approvedBiometrics) {
                 try {
                     const verifyResult = await verifyFingerprint(fingerprint_template, biometric.fingerprint_template);
-                    console.log(`Verify result for CIF ${biometric.cif}:`, JSON.stringify(verifyResult));
                     if (verifyResult.success && verifyResult.match && verifyResult.score > matchScore) {
                         matchedBiometric = biometric;
                         matchScore = verifyResult.score;
                         isSimulatedMatch = verifyResult.simulated || false;
-                        const matchType = isSimulatedMatch ? '[SIMULATED]' : '[REAL]';
-                        console.log(`${matchType} Match found (fallback)! CIF: ${biometric.cif}, Score: ${verifyResult.score}`);
                         break;
                     }
                 } catch (verifyError) {
-                    console.error(`Verify error for CIF ${biometric.cif}:`, verifyError.message);
+                    console.error('[BIOMETRIC_AUTHENTICATE] Verify error:', verifyError.message);
                 }
             }
         }
@@ -4923,10 +4922,10 @@ router.post("/biometric/authenticate", async (req, res) => {
         });
 
     } catch (e) {
-        console.error("Error in biometric authentication:", e);
+        console.error("[BIOMETRIC_AUTHENTICATE] Error:", e.message);
         res.status(500).json({
             error: true,
-            message: e.message || "Authentication failed"
+            message: "Authentication failed"
         });
     }
 });
@@ -4964,10 +4963,10 @@ router.post("/autopopulate-denomination", auth, async (req, res) => {
             }
         });
     } catch (e) {
-        console.error("Error in auto-populate denomination:", e);
+        console.error("[AUTOPOPULATE_DENOMINATION] Error:", e.message);
         res.status(500).json({
             error: true,
-            message: e.message || "Failed to calculate denomination"
+            message: "Failed to calculate denomination"
         });
     }
 });
@@ -5001,10 +5000,10 @@ router.post("/validate-denomination", auth, async (req, res) => {
             }
         });
     } catch (e) {
-        console.error("Error in validate denomination:", e);
+        console.error("[VALIDATE_DENOMINATION] Error:", e.message);
         res.status(500).json({
             error: true,
-            message: e.message || "Failed to validate denomination"
+            message: "Failed to validate denomination"
         });
     }
 });
@@ -5037,10 +5036,10 @@ router.post("/check-withdrawal-limit", auth, async (req, res) => {
             data: limitCheck
         });
     } catch (e) {
-        console.error("Error in check withdrawal limit:", e);
+        console.error("[CHECK_WITHDRAWAL_LIMIT] Error:", e.message);
         res.status(500).json({
             error: true,
-            message: e.message || "Failed to check withdrawal limit"
+            message: "Failed to check withdrawal limit"
         });
     }
 });
@@ -5072,10 +5071,10 @@ router.post("/check-maker-checker", auth, async (req, res) => {
             data: checkerCheck
         });
     } catch (e) {
-        console.error("Error in check maker-checker:", e);
+        console.error("[CHECK_MAKER_CHECKER] Error:", e.message);
         res.status(500).json({
             error: true,
-            message: e.message || "Failed to check maker-checker threshold"
+            message: "Failed to check maker-checker threshold"
         });
     }
 });
@@ -5303,7 +5302,7 @@ router.post("/process-withdraw-with-denomination", auth, async (req, res) => {
         const branchCode = req.user?.branch;
         console.log('\n[WITHDRAW_ROUTE] STEP 2: Starting Till Update');
         console.log('[WITHDRAW_ROUTE] Till ID:', tillId, 'Branch Code:', branchCode);
-        console.log('[WITHDRAW_ROUTE] User from JWT:', JSON.stringify(req.user, null, 2));
+        // User context available from JWT
         try {
             const tillResult = await FlexcubeTransactionService.updateTillForWithdraw(
                 tillId,
@@ -5314,7 +5313,7 @@ router.post("/process-withdraw-with-denomination", auth, async (req, res) => {
             withdraw.till_updated = tillResult.success;
             withdraw.till_update_date = new Date();
         } catch (tillError) {
-            console.error("[WITHDRAW_ROUTE] Till update EXCEPTION:", tillError);
+            console.error("[WITHDRAW_ROUTE] Till update EXCEPTION:", tillError.message);
             // Continue even if till update fails - the Flexcube transaction already succeeded
             withdraw.till_updated = false;
         }
@@ -5345,10 +5344,10 @@ router.post("/process-withdraw-with-denomination", auth, async (req, res) => {
         });
 
     } catch (e) {
-        console.error("Error in process withdraw with denomination:", e);
+        console.error("[PROCESS_WITHDRAW] Error:", e.message);
         res.status(500).json({
             error: true,
-            message: e.message || "Failed to process withdrawal"
+            message: "Failed to process withdrawal"
         });
     }
 });
@@ -5578,7 +5577,7 @@ router.post("/process-echeck-with-denomination", auth, async (req, res) => {
         const branchCode = req.user?.branch;
         console.log('\n[ECHECK_ROUTE] STEP 2: Starting Till Update');
         console.log('[ECHECK_ROUTE] Till ID:', tillId, 'Branch Code:', branchCode);
-        console.log('[ECHECK_ROUTE] User from JWT:', JSON.stringify(req.user, null, 2));
+        // User context available from JWT
         try {
             const tillResult = await FlexcubeTransactionService.updateTillForWithdraw(
                 tillId,
@@ -5589,7 +5588,7 @@ router.post("/process-echeck-with-denomination", auth, async (req, res) => {
             echeck.till_updated = tillResult.success;
             echeck.till_update_date = new Date();
         } catch (tillError) {
-            console.error("[ECHECK_ROUTE] Till update EXCEPTION:", tillError);
+            console.error("[ECHECK_ROUTE] Till update EXCEPTION:", tillError.message);
             // Continue even if till update fails - the Flexcube transaction already succeeded
             echeck.till_updated = false;
         }
@@ -5622,10 +5621,10 @@ router.post("/process-echeck-with-denomination", auth, async (req, res) => {
         });
 
     } catch (e) {
-        console.error("Error in process E-Check with denomination:", e);
+        console.error("[PROCESS_ECHECK] Error:", e.message);
         res.status(500).json({
             error: true,
-            message: e.message || "Failed to process E-Check"
+            message: "Failed to process E-Check"
         });
     }
 });
@@ -5776,7 +5775,7 @@ router.post("/process-deposit-with-denomination", auth, async (req, res) => {
         const branchCode = req.user?.branch;
         console.log('\n[DEPOSIT_ROUTE] STEP 2: Starting Till Update');
         console.log('[DEPOSIT_ROUTE] Till ID:', tillId, 'Branch Code:', branchCode);
-        console.log('[DEPOSIT_ROUTE] User from JWT:', JSON.stringify(req.user, null, 2));
+        // User context available from JWT
         try {
             const tillResult = await FlexcubeTransactionService.updateTillForDeposit(
                 tillId,
@@ -5787,7 +5786,7 @@ router.post("/process-deposit-with-denomination", auth, async (req, res) => {
             deposit.till_updated = tillResult.success;
             deposit.till_update_date = new Date();
         } catch (tillError) {
-            console.error("[DEPOSIT_ROUTE] Till update EXCEPTION:", tillError);
+            console.error("[DEPOSIT_ROUTE] Till update EXCEPTION:", tillError.message);
             // Continue even if till update fails - the Flexcube transaction already succeeded
             deposit.till_updated = false;
         }
@@ -5818,10 +5817,10 @@ router.post("/process-deposit-with-denomination", auth, async (req, res) => {
         });
 
     } catch (e) {
-        console.error("Error in process deposit with denomination:", e);
+        console.error("[PROCESS_DEPOSIT] Error:", e.message);
         res.status(500).json({
             error: true,
-            message: e.message || "Failed to process deposit"
+            message: "Failed to process deposit"
         });
     }
 });
@@ -5981,10 +5980,10 @@ router.post("/process-transfer", auth, async (req, res) => {
         });
 
     } catch (e) {
-        console.error("Error in process transfer:", e);
+        console.error("[PROCESS_TRANSFER] Error:", e.message);
         res.status(500).json({
             error: true,
-            message: e.message || "Failed to process transfer"
+            message: "Failed to process transfer"
         });
     }
 });
@@ -6023,10 +6022,10 @@ router.get("/pending-checker-transactions", auth, async (req, res) => {
         });
 
     } catch (e) {
-        console.error("Error fetching pending checker transactions:", e);
+        console.error("[GET_PENDING_CHECKER] Error:", e.message);
         res.status(500).json({
             error: true,
-            message: e.message || "Failed to fetch pending transactions"
+            message: "Failed to fetch pending transactions"
         });
     }
 });
@@ -6253,7 +6252,7 @@ router.post("/approve-pending-transaction", auth, async (req, res) => {
             transaction.till_updated = true;
             transaction.till_update_date = new Date();
         } catch (tillError) {
-            console.error("[CHECKER_APPROVAL] Till update EXCEPTION:", tillError);
+            console.error("[CHECKER_APPROVAL] Till update EXCEPTION:", tillError.message);
             transaction.till_updated = false;
         }
 
@@ -6294,10 +6293,10 @@ router.post("/approve-pending-transaction", auth, async (req, res) => {
         });
 
     } catch (e) {
-        console.error("Error in approve pending transaction:", e);
+        console.error("[APPROVE_PENDING_TRANSACTION] Error:", e.message);
         res.status(500).json({
             error: true,
-            message: e.message || "Failed to process approval"
+            message: "Failed to process approval"
         });
     }
 });
@@ -6335,10 +6334,10 @@ router.get("/transaction-details/:type/:id", auth, async (req, res) => {
         });
 
     } catch (e) {
-        console.error("Error fetching transaction details:", e);
+        console.error("[GET_TRANSACTION_DETAILS] Error:", e.message);
         res.status(500).json({
             error: true,
-            message: e.message || "Failed to fetch transaction details"
+            message: "Failed to fetch transaction details"
         });
     }
 });
@@ -6349,16 +6348,9 @@ router.get("/transaction-details/:type/:id", auth, async (req, res) => {
 // Returns available denomination counts from teller's till
 // ============================================
 router.get("/get_till_denominations", auth, roleCheck(["Teller", "Maker", "Admin"]), async (req, res, next) => {
-    console.log('\n' + '='.repeat(80));
-    console.log('[GET_TILL_DENOMS] Fetching teller till denominations');
-    console.log('='.repeat(80));
-
     try {
         const tillId = req.user?.till_id;
         const branchCode = req.user?.branch;
-
-        console.log('[GET_TILL_DENOMS] User till_id:', tillId);
-        console.log('[GET_TILL_DENOMS] User branch:', branchCode);
 
         if (!tillId || !branchCode) {
             return res.status(400).json({
@@ -6376,19 +6368,16 @@ router.get("/get_till_denominations", auth, roleCheck(["Teller", "Maker", "Admin
             });
         }
 
-        console.log('[GET_TILL_DENOMS] Successfully fetched till denominations');
-        console.log('='.repeat(80) + '\n');
-
         res.status(200).json({
             error: false,
             message: "Till denominations fetched successfully",
             data: result
         });
     } catch (e) {
-        console.error("[GET_TILL_DENOMS] Error:", e);
+        console.error("[GET_TILL_DENOMS] Error:", e.message);
         res.status(500).json({
             error: true,
-            message: e.message || "Failed to fetch till denominations"
+            message: "Failed to fetch till denominations"
         });
     }
 });
@@ -6399,10 +6388,6 @@ router.get("/get_till_denominations", auth, roleCheck(["Teller", "Maker", "Admin
 // Returns suggested denomination breakdown based on available till counts
 // ============================================
 router.post("/autopopulate_denomination", auth, roleCheck(["Teller", "Maker", "Admin"]), async (req, res, next) => {
-    console.log('\n' + '='.repeat(80));
-    console.log('[AUTOPOPULATE_DENOM] Auto-populating denomination with till check');
-    console.log('='.repeat(80));
-
     try {
         const { amount } = req.body;
 
@@ -6416,13 +6401,8 @@ router.post("/autopopulate_denomination", auth, roleCheck(["Teller", "Maker", "A
         const tillId = req.user?.till_id;
         const branchCode = req.user?.branch;
 
-        console.log('[AUTOPOPULATE_DENOM] Amount:', amount);
-        console.log('[AUTOPOPULATE_DENOM] User till_id:', tillId);
-        console.log('[AUTOPOPULATE_DENOM] User branch:', branchCode);
-
         if (!tillId || !branchCode) {
             // Fall back to basic autopopulate without till check
-            console.log('[AUTOPOPULATE_DENOM] No till configured, using basic autopopulate');
             const denomination = FlexcubeTransactionService.autopopulateDenomination(parseFloat(amount));
             return res.status(200).json({
                 error: false,
@@ -6442,9 +6422,6 @@ router.post("/autopopulate_denomination", auth, roleCheck(["Teller", "Maker", "A
             branchCode
         );
 
-        console.log('[AUTOPOPULATE_DENOM] Result:', JSON.stringify(result, null, 2));
-        console.log('='.repeat(80) + '\n');
-
         res.status(200).json({
             error: false,
             message: result.canFulfill
@@ -6453,10 +6430,10 @@ router.post("/autopopulate_denomination", auth, roleCheck(["Teller", "Maker", "A
             data: result
         });
     } catch (e) {
-        console.error("[AUTOPOPULATE_DENOM] Error:", e);
+        console.error("[AUTOPOPULATE_DENOM] Error:", e.message);
         res.status(500).json({
             error: true,
-            message: e.message || "Failed to auto-populate denomination"
+            message: "Failed to auto-populate denomination"
         });
     }
 });
@@ -6465,7 +6442,7 @@ router.post("/autopopulate_denomination", auth, roleCheck(["Teller", "Maker", "A
  * Generate OTP for customer login
  * POST /api/zsmart_branch_requests/generate-otp
  */
-router.post("/generate-otp", async (req, res) => {
+router.post("/generate-otp", otpLimiter, async (req, res) => {
     try {
         const { account_number } = req.body;
 
@@ -6476,15 +6453,29 @@ router.post("/generate-otp", async (req, res) => {
             });
         }
 
-        // Extract CIF from account number (16-digit account)
-        let cif;
-        if (account_number.length === 16) {
-            const withoutLast3 = account_number.slice(0, -3);
-            cif = withoutLast3.slice(-7);
-        } else {
+        // Validate account number format strictly
+        if (!/^\d{16}$/.test(account_number)) {
             return res.status(400).json({
                 error: true,
                 message: "Invalid account number format"
+            });
+        }
+
+        // Extract CIF from account number (16-digit account)
+        const withoutLast3 = account_number.slice(0, -3);
+        const cif = withoutLast3.slice(-7);
+
+        // Check for account lockout - too many failed OTPs in 15 minutes
+        const recentFailedOTPs = await OTP.countDocuments({
+            cif,
+            verified: false,
+            created_at: { $gte: new Date(Date.now() - 15 * 60 * 1000) }
+        });
+
+        if (recentFailedOTPs >= 5) {
+            return res.status(429).json({
+                error: true,
+                message: "Account temporarily locked due to too many OTP requests. Please try again later."
             });
         }
 
@@ -6497,8 +6488,6 @@ router.post("/generate-otp", async (req, res) => {
 
         const phoneResult = await executeQuery(phoneQuery, [cif]);
 
-        console.log("phoneResult", phoneResult);
-
         if (!phoneResult.success || !phoneResult.data || phoneResult.data.length === 0 || !phoneResult.data[0].TELEPHONE) {
             return res.status(404).json({
                 error: true,
@@ -6507,39 +6496,41 @@ router.post("/generate-otp", async (req, res) => {
         }
 
         let phoneNumber = phoneResult.data[0].TELEPHONE;
-        console.log("phoneNumber", phoneNumber);
 
         // Format phone number if needed (remove +, ensure 251 prefix)
         phoneNumber = phoneNumber.replace('+', '').replace(/^0/, '251');
 
-        // Generate 6-digit OTP
-        const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+        // Generate 6-digit OTP using cryptographically secure random
+        const otpCode = crypto.randomInt(100000, 999999).toString();
 
         // Delete any existing OTPs for this CIF
         await OTP.deleteMany({ cif });
 
-        // Save new OTP
+        // Save new OTP with IP binding
         const newOTP = new OTP({
             cif,
             account_number,
             phone_number: phoneNumber,
-            otp_code: otpCode
+            otp_code: otpCode,
+            ip_address: req.ip
         });
 
         await newOTP.save();
 
         // Send OTP via SMS
+        const smsUsername = process.env.SMS_USERNAME || 'smartbranch';
+        const smsPassword = process.env.SMS_PASSWORD || 'Y8z6pTB80l6%234siD';
         const smsContent = `Your Smart Branch login OTP is: ${otpCode}. This code will expire in 3 minutes. Do not share this code with anyone.`;
         const encodedContent = encodeURIComponent(smsContent);
-        const smsUrl = `https://smsgateway.zemenbank.com/http-api/send?username=smartbranch&password=Y8z6pTB80l6%234siD&to=${phoneNumber}&from=8011&coding=8&content=${encodedContent}`;
+        const smsUrl = `https://smsgateway.zemenbank.com/http-api/send?username=${smsUsername}&password=${smsPassword}&to=${phoneNumber}&from=8011&coding=8&content=${encodedContent}`;
 
         try {
             const response = await fetch(smsUrl);
             if (!response.ok) {
-                console.error("SMS sending failed:", await response.text());
+                console.error("[GENERATE_OTP] SMS sending failed");
             }
         } catch (smsError) {
-            console.error("SMS sending error:", smsError);
+            console.error("[GENERATE_OTP] SMS sending error");
         }
 
         // Mask phone number for response (show only last 4 digits)
@@ -6555,10 +6546,10 @@ router.post("/generate-otp", async (req, res) => {
         });
 
     } catch (e) {
-        console.error("[GENERATE_OTP] Error:", e);
+        console.error("[GENERATE_OTP] Error:", e.message);
         res.status(500).json({
             error: true,
-            message: e.message || "Failed to generate OTP"
+            message: "Failed to generate OTP"
         });
     }
 });
@@ -6567,7 +6558,7 @@ router.post("/generate-otp", async (req, res) => {
  * Verify OTP for customer login
  * POST /api/zsmart_branch_requests/verify-otp
  */
-router.post("/verify-otp", async (req, res) => {
+router.post("/verify-otp", otpVerifyLimiter, async (req, res) => {
     try {
         const { account_number, otp_code } = req.body;
 
@@ -6578,17 +6569,25 @@ router.post("/verify-otp", async (req, res) => {
             });
         }
 
-        // Extract CIF from account number
-        let cif;
-        if (account_number.length === 16) {
-            const withoutLast3 = account_number.slice(0, -3);
-            cif = withoutLast3.slice(-7);
-        } else {
+        // Validate account number format strictly
+        if (!/^\d{16}$/.test(account_number)) {
             return res.status(400).json({
                 error: true,
                 message: "Invalid account number format"
             });
         }
+
+        // Validate OTP format (must be 6 digits)
+        if (!/^\d{6}$/.test(otp_code.trim())) {
+            return res.status(400).json({
+                error: true,
+                message: "Invalid OTP format"
+            });
+        }
+
+        // Extract CIF from account number
+        const withoutLast3 = account_number.slice(0, -3);
+        const cif = withoutLast3.slice(-7);
 
         // Find the OTP record
         const otpRecord = await OTP.findOne({
@@ -6613,8 +6612,12 @@ router.post("/verify-otp", async (req, res) => {
             });
         }
 
-        // Verify OTP
-        if (otpRecord.otp_code !== otp_code.trim()) {
+        // Verify OTP using timing-safe comparison
+        const otpBuffer = Buffer.from(otpRecord.otp_code.padEnd(6));
+        const inputBuffer = Buffer.from(otp_code.trim().padEnd(6));
+        const isValid = crypto.timingSafeEqual(otpBuffer, inputBuffer);
+
+        if (!isValid) {
             // Increment attempts
             otpRecord.attempts += 1;
             await otpRecord.save();
@@ -6642,10 +6645,10 @@ router.post("/verify-otp", async (req, res) => {
         });
 
     } catch (e) {
-        console.error("[VERIFY_OTP] Error:", e);
+        console.error("[VERIFY_OTP] Error:", e.message);
         res.status(500).json({
             error: true,
-            message: e.message || "Failed to verify OTP"
+            message: "Failed to verify OTP"
         });
     }
 });

@@ -46,6 +46,8 @@ const other_bank_transferSchema =  new Schema({
     trn_ref_no:{
         type: String,
         trim: true,
+        unique: true,
+        sparse: true,
     },
 
     acc_holder_branch:{

@@ -67,19 +67,31 @@ import crypto from 'crypto'
 // import cardProductionRoutes from "./routes/newRequest/cardProduction.js";
 
 import cors from "cors"
+import helmet from "helmet"
+import { generalLimiter } from "./middleware/rms/rateLimiter.js"
 
 
 
 const app = express();
-app.use(cors())
 
+// Security headers
+app.use(helmet());
 
-// const corsOptions = {
-//   origin: 'https://l9vrnplr-3000.uks1.devtunnels.ms',
-//   optionsSuccessStatus: 200
-// };
+// Restrictive CORS - only allow known frontends
+const corsOptions = {
+  origin: [
+    'http://10.1.1.181:3000',
+    'http://10.1.1.181:4000',
+    'http://localhost:3000',
+    'http://localhost:4000',
+  ],
+  optionsSuccessStatus: 200,
+  credentials: true,
+};
+app.use(cors(corsOptions));
 
-// app.use(cors(corsOptions));
+// Global rate limiting
+app.use(generalLimiter);
 
 
 
@@ -183,6 +195,15 @@ app.use("/api/rms/admin/landing",
 
 
 
+
+// Centralized error handling middleware - must be after all routes
+app.use((err, req, res, next) => {
+    console.error(`[ERROR] ${req.method} ${req.path}:`, err.message);
+    res.status(err.status || 500).json({
+        error: true,
+        message: 'An internal error occurred'
+    });
+});
 
 const port = process.env.PORT || 8081;
 

@@ -1,11 +1,12 @@
 import mongoose from "mongoose";
+import crypto from "crypto";
 const Schema = mongoose.Schema;
 
 /**
  * XrefCounter Model
  * Generates auto-incrementing 16-digit XREF (external reference) for transactions
- * XREF starts from 1 and increments globally (not reset daily)
- * Format: 16-digit zero-padded number (e.g., 0000000000000001)
+ * Format: 8-digit sequential + 8-digit random hex (e.g., 00000001A7F9C2B3)
+ * The random component prevents enumeration/prediction of reference numbers
  */
 const xrefCounterSchema = new Schema({
     name: {
@@ -24,7 +25,7 @@ const xrefCounterSchema = new Schema({
     }
 });
 
-// Static method for atomic increment
+// Static method for atomic increment with random component
 xrefCounterSchema.statics.getNextXref = async function() {
     const result = await this.findOneAndUpdate(
         { name: 'xref_counter' },
@@ -40,8 +41,10 @@ xrefCounterSchema.statics.getNextXref = async function() {
         }
     );
 
-    // Return 16-digit zero-padded string
-    return String(result.count).padStart(16, '0');
+    // 8-digit sequential + 8-digit random hex = 16 chars total
+    const seq = String(result.count).padStart(8, '0');
+    const random = crypto.randomBytes(4).toString('hex').toUpperCase();
+    return seq + random;
 };
 
 // Get current count without incrementing

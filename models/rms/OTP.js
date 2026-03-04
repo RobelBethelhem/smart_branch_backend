@@ -40,6 +40,10 @@ const otpSchema = new Schema({
     max_attempts: {
         type: Number,
         default: 3
+    },
+    ip_address: {
+        type: String,
+        trim: true
     }
 }, {
     timestamps: true

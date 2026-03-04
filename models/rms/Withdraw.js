@@ -89,6 +89,8 @@ const withdrawSchema = new Schema({
     trn_ref_no: {
         type: String,
         trim: true,
+        unique: true,
+        sparse: true,
     },
 
     // NEW: External Reference (16-digit auto-increment)
