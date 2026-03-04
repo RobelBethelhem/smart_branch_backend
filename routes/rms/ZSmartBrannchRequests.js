@@ -6935,12 +6935,12 @@ router.post("/verify-otp", otpVerifyLimiter, async (req, res) => {
         await otpRecord.save();
         await OTP.deleteOne({ _id: otpRecord._id });
 
+        // Return encrypted token instead of plaintext account number
         res.json({
             error: false,
             message: "OTP verified successfully",
             data: {
-                cif,
-                account_number
+                encryptedToken: encryptAccountNumber(account_number)
             }
         });
 
