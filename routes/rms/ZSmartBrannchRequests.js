@@ -24,6 +24,7 @@ import MakerCheckerThreshold from '../../models/rms/MakerCheckerThreshold.js';
 import crypto from 'crypto';
 import { otpLimiter, otpVerifyLimiter } from '../../middleware/rms/rateLimiter.js';
 import { encryptAccountNumber, decryptAccountToken, extractCIF } from '../../utils/rms/accountEncryption.js';
+import { decryptPayload } from '../../utils/rms/payloadDecryption.js';
 
 // Fingerprint service paths
 const __filename_fp = fileURLToPath(import.meta.url);
@@ -861,6 +862,15 @@ router.get("/get_assigned_transaction_per_brnach", auth, roleCheck(["Admin", "Au
 
 router.post("/deposit", async(req, res, next) => {
     try {
+        // Decrypt payload if encrypted
+        let body = req.body;
+        if (body.encrypted && typeof body.encrypted === 'string') {
+            try {
+                body = decryptPayload(body.encrypted);
+            } catch (decErr) {
+                return res.status(400).json({ error: true, message: "Invalid or tampered request payload" });
+            }
+        }
         const {
             acc_holder_name,
             amount_in_words,
@@ -873,7 +883,7 @@ router.post("/deposit", async(req, res, next) => {
             account_type,
             system,
             branch
-        } = req.body;
+        } = body;
 
         // Generate unique Customer_Unique_Number server-side (ignore client value)
         const Customer_Unique_Number = await generateUniqueCustomerNumber();
@@ -993,7 +1003,7 @@ router.post("/deposit", async(req, res, next) => {
             error: false, 
             message: "Deposit request created successfully",
             data: {
-                Queue_number: newDeposit.Customer_Unique_Number,
+                Queue_number: newDeposit.Queue_number,
                 request_date: newDeposit.request_date,
                 status: newDeposit.status,
                 assigned_to: newDeposit.assigned_to
@@ -1012,7 +1022,16 @@ router.post("/deposit", async(req, res, next) => {
 // 2. Withdraw Endpoint
 router.post("/withdraw", async(req, res, next) => {
     try {
-        delete req.body.reference_number;
+        // Decrypt payload if encrypted
+        let body = req.body;
+        if (body.encrypted && typeof body.encrypted === 'string') {
+            try {
+                body = decryptPayload(body.encrypted);
+            } catch (decErr) {
+                return res.status(400).json({ error: true, message: "Invalid or tampered request payload" });
+            }
+        }
+        delete body.reference_number;
         const {
             acc_holder_name,
             amount_in_words,
@@ -1025,7 +1044,7 @@ router.post("/withdraw", async(req, res, next) => {
             account_type,
             system,
             branch
-        } = req.body;
+        } = body;
 
         // Generate unique Customer_Unique_Number server-side (ignore client value)
         const Customer_Unique_Number = await generateUniqueCustomerNumber();
@@ -1180,7 +1199,7 @@ router.post("/withdraw", async(req, res, next) => {
             error: false, 
             message: "Withdraw request created successfully",
             data: {
-                Queue_number: newWithdraw.Customer_Unique_Number,
+                Queue_number: newWithdraw.Queue_number,
                 request_date: newWithdraw.request_date,
                 status: newWithdraw.status,
                 assigned_to: newWithdraw.assigned_to
@@ -1199,7 +1218,16 @@ router.post("/withdraw", async(req, res, next) => {
 // E-Check Endpoint (same as withdraw + recipient information)
 router.post("/echeck", async(req, res, next) => {
     try {
-        delete req.body.reference_number;
+        // Decrypt payload if encrypted
+        let body = req.body;
+        if (body.encrypted && typeof body.encrypted === 'string') {
+            try {
+                body = decryptPayload(body.encrypted);
+            } catch (decErr) {
+                return res.status(400).json({ error: true, message: "Invalid or tampered request payload" });
+            }
+        }
+        delete body.reference_number;
         const {
             acc_holder_name,
             recipient_full_name,
@@ -1214,7 +1242,7 @@ router.post("/echeck", async(req, res, next) => {
             account_type,
             system,
             branch
-        } = req.body;
+        } = body;
 
         // Generate unique Customer_Unique_Number server-side (ignore client value)
         const Customer_Unique_Number = await generateUniqueCustomerNumber();
@@ -1396,8 +1424,17 @@ router.post("/echeck", async(req, res, next) => {
 // 3. Transfer Endpoint
 router.post("/transfer", async(req, res, next) => {
     try {
-        req.body.payment_narration = req.body.payment_narrative;
-        delete req.body.payment_narrative;
+        // Decrypt payload if encrypted
+        let body = req.body;
+        if (body.encrypted && typeof body.encrypted === 'string') {
+            try {
+                body = decryptPayload(body.encrypted);
+            } catch (decErr) {
+                return res.status(400).json({ error: true, message: "Invalid or tampered request payload" });
+            }
+        }
+        body.payment_narration = body.payment_narrative;
+        delete body.payment_narrative;
         const {
             acc_holder_name,
             amount_in_words,
@@ -1412,7 +1449,7 @@ router.post("/transfer", async(req, res, next) => {
             account_type,
             system,
             branch
-        } = req.body;
+        } = body;
 
         // Generate unique Customer_Unique_Number server-side (ignore client value)
         const Customer_Unique_Number = await generateUniqueCustomerNumber();
@@ -1568,7 +1605,7 @@ router.post("/transfer", async(req, res, next) => {
             error: false, 
             message: "Transfer request created successfully",
             data: {
-                Queue_number: newTransfer.Customer_Unique_Number,
+                Queue_number: newTransfer.Queue_number,
                 request_date: newTransfer.request_date,
                 status: newTransfer.status,
                 assigned_to: newTransfer.assigned_to
@@ -1588,6 +1625,15 @@ router.post("/transfer", async(req, res, next) => {
 // 4. Other Bank Transfer Endpoint
 router.post("/other_bank_transfer", async(req, res, next) => {
     try {
+        // Decrypt payload if encrypted
+        let body = req.body;
+        if (body.encrypted && typeof body.encrypted === 'string') {
+            try {
+                body = decryptPayload(body.encrypted);
+            } catch (decErr) {
+                return res.status(400).json({ error: true, message: "Invalid or tampered request payload" });
+            }
+        }
         const {
             acc_holder_name,
             amount_in_words,
@@ -1597,7 +1643,7 @@ router.post("/other_bank_transfer", async(req, res, next) => {
             telephone,
             transfer_type,
             beneficiary_bank,
-            signature, 
+            signature,
             account_number,
             beneficiary_account_number,
             beneficiary_branch,
@@ -1605,7 +1651,7 @@ router.post("/other_bank_transfer", async(req, res, next) => {
             account_type,
             system,
             branch
-        } = req.body;
+        } = body;
 
         // Generate unique Customer_Unique_Number server-side (ignore client value)
         const Customer_Unique_Number = await generateUniqueCustomerNumber();
@@ -1754,7 +1800,7 @@ router.post("/other_bank_transfer", async(req, res, next) => {
             error: false, 
             message: "Other Bank Transfer request created successfully",
             data: {
-                Queue_number: newOtherBankTransfer.Customer_Unique_Number,
+                Queue_number: newOtherBankTransfer.Queue_number,
                 request_date: newOtherBankTransfer.request_date,
                 status: newOtherBankTransfer.status,
                 assigned_to: newOtherBankTransfer.assigned_to
