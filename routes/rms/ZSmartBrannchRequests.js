@@ -1027,7 +1027,9 @@ router.post("/withdraw", async(req, res, next) => {
         if (body.encrypted && typeof body.encrypted === 'string') {
             try {
                 body = decryptPayload(body.encrypted);
+                console.log('[Withdraw] Payload decrypted successfully');
             } catch (decErr) {
+                console.error('[Withdraw] Decryption failed:', decErr.message);
                 return res.status(400).json({ error: true, message: "Invalid or tampered request payload" });
             }
         }
