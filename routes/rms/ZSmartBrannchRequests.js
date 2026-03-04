@@ -23,6 +23,7 @@ import CustomerCategoryLimit from '../../models/rms/CustomerCategoryLimit.js';
 import MakerCheckerThreshold from '../../models/rms/MakerCheckerThreshold.js';
 import crypto from 'crypto';
 import { otpLimiter, otpVerifyLimiter } from '../../middleware/rms/rateLimiter.js';
+import { encryptAccountNumber, decryptAccountToken, extractCIF } from '../../utils/rms/accountEncryption.js';
 
 // Fingerprint service paths
 const __filename_fp = fileURLToPath(import.meta.url);
@@ -4987,7 +4988,7 @@ router.get("/biometric/customer/:cif", auth, roleCheck(["Teller", "Maker"]), asy
 // Uses ZK SDK's fast 1:N DBIdentify for efficient matching (~50,000+ templates/second)
 router.post("/biometric/authenticate", async (req, res) => {
     try {
-        const { fingerprint_template, cif: requestedCif } = req.body;
+        const { fingerprint_template, cif: requestedCif, encryptedToken } = req.body;
 
         if (!fingerprint_template) {
             return res.status(400).json({
@@ -4996,10 +4997,24 @@ router.post("/biometric/authenticate", async (req, res) => {
             });
         }
 
+        // Derive CIF from encrypted token if provided (name/phone search flow)
+        let cifToUse = requestedCif;
+        if (encryptedToken && !requestedCif) {
+            try {
+                const accountNumber = decryptAccountToken(encryptedToken);
+                cifToUse = extractCIF(accountNumber);
+            } catch (err) {
+                return res.status(400).json({
+                    error: true,
+                    message: "Invalid or expired account token"
+                });
+            }
+        }
+
         // Get all approved biometrics (or just the specific CIF if provided)
         const query = { status: 'approved' };
-        if (requestedCif) {
-            query.cif = requestedCif;
+        if (cifToUse) {
+            query.cif = cifToUse;
         }
         const approvedBiometrics = await Biometric.find(query);
 
@@ -6627,17 +6642,104 @@ router.post("/autopopulate_denomination", auth, roleCheck(["Teller", "Maker", "A
 });
 
 /**
+ * Encrypt account numbers into opaque tokens (server-to-server use only)
+ * POST /api/zsmart_branch_requests/encrypt-tokens
+ */
+router.post("/encrypt-tokens", async (req, res) => {
+    try {
+        const { accountNumbers } = req.body;
+
+        if (!accountNumbers || !Array.isArray(accountNumbers) || accountNumbers.length === 0) {
+            return res.status(400).json({
+                error: true,
+                message: "accountNumbers array is required"
+            });
+        }
+
+        // Limit batch size
+        if (accountNumbers.length > 10) {
+            return res.status(400).json({
+                error: true,
+                message: "Maximum 10 account numbers per request"
+            });
+        }
+
+        const tokens = accountNumbers.map(accNo => {
+            if (!/^\d{16}$/.test(accNo)) {
+                throw new Error(`Invalid account number format: ${accNo}`);
+            }
+            return encryptAccountNumber(accNo);
+        });
+
+        res.json({
+            error: false,
+            tokens
+        });
+
+    } catch (e) {
+        console.error("[ENCRYPT_TOKENS] Error:", e.message);
+        res.status(400).json({
+            error: true,
+            message: e.message || "Encryption failed"
+        });
+    }
+});
+
+/**
+ * Decrypt an encrypted token back to account number (server-to-server use only)
+ * POST /api/zsmart_branch_requests/decrypt-token
+ */
+router.post("/decrypt-token", async (req, res) => {
+    try {
+        const { encryptedToken } = req.body;
+
+        if (!encryptedToken) {
+            return res.status(400).json({
+                error: true,
+                message: "encryptedToken is required"
+            });
+        }
+
+        const accountNumber = decryptAccountToken(encryptedToken);
+
+        res.json({
+            error: false,
+            accountNumber
+        });
+
+    } catch (e) {
+        console.error("[DECRYPT_TOKEN] Error:", e.message);
+        res.status(400).json({
+            error: true,
+            message: "Invalid or expired token"
+        });
+    }
+});
+
+/**
  * Generate OTP for customer login
  * POST /api/zsmart_branch_requests/generate-otp
  */
 router.post("/generate-otp", otpLimiter, async (req, res) => {
     try {
-        const { account_number } = req.body;
+        let { account_number, encryptedToken } = req.body;
+
+        // If encrypted token provided, decrypt it to get account number
+        if (encryptedToken && !account_number) {
+            try {
+                account_number = decryptAccountToken(encryptedToken);
+            } catch (err) {
+                return res.status(400).json({
+                    error: true,
+                    message: "Invalid or expired account token. Please search again."
+                });
+            }
+        }
 
         if (!account_number) {
             return res.status(400).json({
                 error: true,
-                message: "Account number is required"
+                message: "Account number or encrypted token is required"
             });
         }
 
@@ -6650,8 +6752,7 @@ router.post("/generate-otp", otpLimiter, async (req, res) => {
         }
 
         // Extract CIF from account number (16-digit account)
-        const withoutLast3 = account_number.slice(0, -3);
-        const cif = withoutLast3.slice(-7);
+        const cif = extractCIF(account_number);
 
         // Check for account lockout - too many failed OTPs in 15 minutes
         const recentFailedOTPs = await OTP.countDocuments({
@@ -6748,12 +6849,24 @@ router.post("/generate-otp", otpLimiter, async (req, res) => {
  */
 router.post("/verify-otp", otpVerifyLimiter, async (req, res) => {
     try {
-        const { account_number, otp_code } = req.body;
+        let { account_number, otp_code, encryptedToken } = req.body;
+
+        // If encrypted token provided, decrypt it to get account number
+        if (encryptedToken && !account_number) {
+            try {
+                account_number = decryptAccountToken(encryptedToken);
+            } catch (err) {
+                return res.status(400).json({
+                    error: true,
+                    message: "Invalid or expired account token. Please search again."
+                });
+            }
+        }
 
         if (!account_number || !otp_code) {
             return res.status(400).json({
                 error: true,
-                message: "Account number and OTP code are required"
+                message: "Account number (or encrypted token) and OTP code are required"
             });
         }
 
@@ -6774,8 +6887,7 @@ router.post("/verify-otp", otpVerifyLimiter, async (req, res) => {
         }
 
         // Extract CIF from account number
-        const withoutLast3 = account_number.slice(0, -3);
-        const cif = withoutLast3.slice(-7);
+        const cif = extractCIF(account_number);
 
         // Find the OTP record
         const otpRecord = await OTP.findOne({
