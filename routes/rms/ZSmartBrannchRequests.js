@@ -1250,6 +1250,23 @@ router.post("/echeck", async(req, res, next) => {
             });
         }
 
+        // Server-side daily withdrawal limit check
+        try {
+            const limitCheck = await FlexcubeTransactionService.checkWithdrawalLimit(account_number, amount);
+            if (!limitCheck.allowed) {
+                return res.status(400).json({
+                    error: true,
+                    message: limitCheck.reason || "E-Check exceeds daily withdrawal limit"
+                });
+            }
+        } catch (limitError) {
+            console.error("[ECHECK] Limit check error:", limitError.message);
+            return res.status(400).json({
+                error: true,
+                message: "Unable to verify withdrawal limit. Please try again."
+            });
+        }
+
         let correctedAccountType;
         switch(account_type.toLowerCase()) {
             case 'savings':
@@ -1426,6 +1443,23 @@ router.post("/transfer", async(req, res, next) => {
             });
         }
 
+        // Server-side daily withdrawal limit check
+        try {
+            const limitCheck = await FlexcubeTransactionService.checkWithdrawalLimit(account_number, amount);
+            if (!limitCheck.allowed) {
+                return res.status(400).json({
+                    error: true,
+                    message: limitCheck.reason || "Transfer exceeds daily withdrawal limit"
+                });
+            }
+        } catch (limitError) {
+            console.error("[TRANSFER] Limit check error:", limitError.message);
+            return res.status(400).json({
+                error: true,
+                message: "Unable to verify withdrawal limit. Please try again."
+            });
+        }
+
         let correctedAccountType;
         switch(account_type.toLowerCase()) {
             case 'savings':
@@ -1594,6 +1628,23 @@ router.post("/other_bank_transfer", async(req, res, next) => {
             return res.status(400).json({
                 error: true,
                 message: "Unable to verify account balance. Please try again."
+            });
+        }
+
+        // Server-side daily withdrawal limit check
+        try {
+            const limitCheck = await FlexcubeTransactionService.checkWithdrawalLimit(account_number, amount);
+            if (!limitCheck.allowed) {
+                return res.status(400).json({
+                    error: true,
+                    message: limitCheck.reason || "Transfer exceeds daily withdrawal limit"
+                });
+            }
+        } catch (limitError) {
+            console.error("[OTHER_BANK_TRANSFER] Limit check error:", limitError.message);
+            return res.status(400).json({
+                error: true,
+                message: "Unable to verify withdrawal limit. Please try again."
             });
         }
 
