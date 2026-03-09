@@ -468,9 +468,11 @@ export function buildCreateTransactionSOAP(params) {
  * Note: This requires actual SOAP client implementation
  */
 export async function executeFlexcubeTransaction(soapMessage, endpoint = null) {
-    // Default endpoint - should be configured in environment
-    const flexcubeEndpoint = endpoint || process.env.FLEXCUBE_RT_SERVICE_URL ||
-        'http://10.1.2.138:7004/soa-infra/services/default/FCUBSRTService/fcubsrtserviceprocess_client_ep?WSDL';
+    // Endpoint configured via FLEXCUBE_RT_SERVICE_URL in .env
+    const flexcubeEndpoint = endpoint || process.env.FLEXCUBE_RT_SERVICE_URL;
+    if (!flexcubeEndpoint) {
+        throw new Error('FLEXCUBE_RT_SERVICE_URL is not configured in .env');
+    }
 
     // Timeout in milliseconds (30 seconds)
     const TIMEOUT_MS = 30000;

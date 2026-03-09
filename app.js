@@ -77,14 +77,15 @@ const app = express();
 // Security headers
 app.use(helmet());
 
-// Restrictive CORS - only allow known frontends
+// Restrictive CORS - configured via CORS_ORIGINS in .env
+// Default allows localhost:3000 and localhost:4000
+// For production, set: CORS_ORIGINS=http://10.1.1.181:3000,http://10.1.1.181:4000
+const defaultOrigins = ['http://localhost:3000', 'http://localhost:4000'];
+const corsOrigins = process.env.CORS_ORIGINS
+  ? process.env.CORS_ORIGINS.split(',').map(o => o.trim())
+  : defaultOrigins;
 const corsOptions = {
-  origin: [
-    'http://10.1.1.181:3000',
-    'http://10.1.1.181:4000',
-    'http://localhost:3000',
-    'http://localhost:4000',
-  ],
+  origin: corsOrigins,
   optionsSuccessStatus: 200,
   credentials: true,
 };
