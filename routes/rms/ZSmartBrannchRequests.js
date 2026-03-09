@@ -3651,7 +3651,7 @@ router.post("/transaction_authorized", auth, roleCheck(["Teller", "Authorizer"])
 // });
 
 
-router.post("/transaction_audited", auth, roleCheck(["Auditor","Teller"]), async(req, res, next) => {
+router.post("/transaction_audited", auth, roleCheck(["Auditor"]), async(req, res, next) => {
     try {
         // Get current user
         const user = await User.findById(req.user._id).lean();
@@ -3717,11 +3717,11 @@ router.post("/transaction_audited", auth, roleCheck(["Auditor","Teller"]), async
                 continue;
             }
 
-            // Check if status is authorized
-            if (existingTransaction.status !== 'authorized') {
+            // Check if status is posted or authorized
+            if (existingTransaction.status !== 'authorized' && existingTransaction.status !== 'posted') {
                 updateResults.skipped.push({
                     id: transaction.id,
-                    reason: `Transaction status is ${existingTransaction.status}, expected 'authorized'`
+                    reason: `Transaction status is '${existingTransaction.status}', expected 'posted' or 'authorized'`
                 });
                 continue;
             }
@@ -3748,7 +3748,7 @@ router.post("/transaction_audited", auth, roleCheck(["Auditor","Teller"]), async
             const updateResult = await Model.updateOne(
                 {
                     _id: transaction.id,
-                    status: 'authorized',
+                    status: { $in: ['posted', 'authorized'] },
                     branch: user.branch
                 },
                 {
