@@ -135,7 +135,7 @@ const transferSchema = new Schema({
     },
     request_date: {
         type: Date,
-        default: new Date().toISOString()
+        default: Date.now
     },
     assigned_date: {
         type: Date,
