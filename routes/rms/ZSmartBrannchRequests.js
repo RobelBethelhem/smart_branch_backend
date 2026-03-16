@@ -2490,7 +2490,18 @@ router.post("/transaction_posted", auth, roleCheck(["Teller"]), async(req, res, 
 
 router.put("/edit_smart_branch_request", auth, async(req, res, next) => {
     try {
-        const { 
+        // Encrypted payload is REQUIRED — reject plaintext requests
+        let body = req.body;
+        if (!body.encrypted || typeof body.encrypted !== 'string') {
+            return res.status(400).json({ error: true, message: "Encrypted payload is required" });
+        }
+        try {
+            body = decryptPayload(body.encrypted);
+        } catch (decErr) {
+            return res.status(400).json({ error: true, message: "Invalid or tampered request payload" });
+        }
+
+        const {
             amount_in_figures,
             amount_in_words,
             Customer_Unique_Number,
@@ -2501,7 +2512,7 @@ router.put("/edit_smart_branch_request", auth, async(req, res, next) => {
             payment_narration,
             beneficiary_bank,
             beneficiary_branch
-        } = req.body;
+        } = body;
 
         // Validate required fields
         if (!Customer_Unique_Number || !request_type) {
@@ -2603,7 +2614,18 @@ router.put("/edit_smart_branch_request", auth, async(req, res, next) => {
 // Delete endpoint
 router.delete("/delete_smart_branch_request", auth, async(req, res, next) => {
     try {
-        const { Customer_Unique_Number, request_type } = req.body;
+        // Encrypted payload is REQUIRED — reject plaintext requests
+        let body = req.body;
+        if (!body.encrypted || typeof body.encrypted !== 'string') {
+            return res.status(400).json({ error: true, message: "Encrypted payload is required" });
+        }
+        try {
+            body = decryptPayload(body.encrypted);
+        } catch (decErr) {
+            return res.status(400).json({ error: true, message: "Invalid or tampered request payload" });
+        }
+
+        const { Customer_Unique_Number, request_type } = body;
 
         // Validate required fields
         if (!Customer_Unique_Number || !request_type) {
