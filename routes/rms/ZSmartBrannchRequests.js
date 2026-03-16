@@ -60,6 +60,9 @@ async function validateTransactionSession(body, res) {
             }
         }
 
+        // Remove sessionToken from body so it doesn't leak into MongoDB records
+        delete body.sessionToken;
+
         return true;
     } catch (err) {
         console.error("[VALIDATE_SESSION] Error:", err.message);
@@ -7207,6 +7210,47 @@ router.post("/verify-transaction-session", async (req, res) => {
         res.status(500).json({
             error: true,
             message: "Transaction session verification failed"
+        });
+    }
+});
+
+// ============================================
+// DESTROY SESSION (LOGOUT)
+// Immediately invalidates the session on logout.
+// Prevents session reuse after the user logs out.
+// ============================================
+router.post("/destroy-session", async (req, res) => {
+    try {
+        const { sessionToken } = req.body;
+
+        if (!sessionToken || typeof sessionToken !== 'string') {
+            return res.status(400).json({
+                error: true,
+                message: "Session token is required"
+            });
+        }
+
+        // Delete the session from MongoDB immediately
+        const result = await VerifiedSession.deleteOne({ session_token: sessionToken });
+
+        if (result.deletedCount === 0) {
+            // Session already expired or never existed — not an error
+            return res.json({
+                error: false,
+                message: "Session already expired or not found"
+            });
+        }
+
+        res.json({
+            error: false,
+            message: "Session destroyed successfully"
+        });
+
+    } catch (error) {
+        console.error("[DESTROY_SESSION] Error:", error.message);
+        res.status(500).json({
+            error: true,
+            message: "Failed to destroy session"
         });
     }
 });
