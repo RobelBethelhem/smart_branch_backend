@@ -2489,6 +2489,7 @@ router.post("/transaction_posted", auth, roleCheck(["Teller"]), async(req, res, 
 
 
 // No auth required — the 10-char alphanumeric reference number is the customer's proof
+// Encrypted payload + valid reference number = authorization
 router.put("/edit_smart_branch_request", async(req, res, next) => {
     try {
         // Encrypted payload is REQUIRED — reject plaintext requests
@@ -2520,6 +2521,33 @@ router.put("/edit_smart_branch_request", async(req, res, next) => {
             return res.status(400).json({
                 error: true,
                 message: "Customer Unique Number and request type are required"
+            });
+        }
+
+        // Validate reference number format (must be 10-char alphanumeric)
+        if (!/^[A-Z0-9]{10}$/.test(Customer_Unique_Number)) {
+            return res.status(400).json({
+                error: true,
+                message: "Invalid reference number format"
+            });
+        }
+
+        // Verify the reference number exists (prevents blind Postman attacks)
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const searchQuery = { Customer_Unique_Number, request_date: { $gte: today } };
+        const exists = await Promise.any([
+            Deposit.findOne(searchQuery).lean(),
+            Withdraw.findOne(searchQuery).lean(),
+            Transfer.findOne(searchQuery).lean(),
+            Other_Bank_Transfer.findOne(searchQuery).lean(),
+            ECheck.findOne(searchQuery).lean(),
+        ].map(p => p.then(r => r || Promise.reject()))).catch(() => null);
+
+        if (!exists) {
+            return res.status(404).json({
+                error: true,
+                message: "Reference number not found or expired"
             });
         }
 
@@ -2613,7 +2641,7 @@ router.put("/edit_smart_branch_request", async(req, res, next) => {
 });
 
 // Delete endpoint
-// No auth required — the 10-char alphanumeric reference number is the customer's proof
+// No auth required — encrypted payload + valid reference number = authorization
 router.delete("/delete_smart_branch_request", async(req, res, next) => {
     try {
         // Encrypted payload is REQUIRED — reject plaintext requests
@@ -2634,6 +2662,33 @@ router.delete("/delete_smart_branch_request", async(req, res, next) => {
             return res.status(400).json({
                 error: true,
                 message: "Customer Unique Number and request type are required"
+            });
+        }
+
+        // Validate reference number format (must be 10-char alphanumeric)
+        if (!/^[A-Z0-9]{10}$/.test(Customer_Unique_Number)) {
+            return res.status(400).json({
+                error: true,
+                message: "Invalid reference number format"
+            });
+        }
+
+        // Verify the reference number exists (prevents blind Postman attacks)
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const searchQuery = { Customer_Unique_Number, request_date: { $gte: today } };
+        const exists = await Promise.any([
+            Deposit.findOne(searchQuery).lean(),
+            Withdraw.findOne(searchQuery).lean(),
+            Transfer.findOne(searchQuery).lean(),
+            Other_Bank_Transfer.findOne(searchQuery).lean(),
+            ECheck.findOne(searchQuery).lean(),
+        ].map(p => p.then(r => r || Promise.reject()))).catch(() => null);
+
+        if (!exists) {
+            return res.status(404).json({
+                error: true,
+                message: "Reference number not found or expired"
             });
         }
 
