@@ -910,14 +910,15 @@ router.get("/get_assigned_transaction_per_brnach", auth, roleCheck(["Admin", "Au
 
 router.post("/deposit", async(req, res, next) => {
     try {
-        // Decrypt payload if encrypted
+        // Encrypted payload is REQUIRED — reject plaintext requests
         let body = req.body;
-        if (body.encrypted && typeof body.encrypted === 'string') {
-            try {
-                body = decryptPayload(body.encrypted);
-            } catch (decErr) {
-                return res.status(400).json({ error: true, message: "Invalid or tampered request payload" });
-            }
+        if (!body.encrypted || typeof body.encrypted !== 'string') {
+            return res.status(400).json({ error: true, message: "Encrypted payload is required" });
+        }
+        try {
+            body = decryptPayload(body.encrypted);
+        } catch (decErr) {
+            return res.status(400).json({ error: true, message: "Invalid or tampered request payload" });
         }
 
         // Validate session token if provided (prevents unauthorized transactions)
@@ -1075,16 +1076,17 @@ router.post("/deposit", async(req, res, next) => {
 // 2. Withdraw Endpoint
 router.post("/withdraw", async(req, res, next) => {
     try {
-        // Decrypt payload if encrypted
+        // Encrypted payload is REQUIRED — reject plaintext requests
         let body = req.body;
-        if (body.encrypted && typeof body.encrypted === 'string') {
-            try {
-                body = decryptPayload(body.encrypted);
-                console.log('[Withdraw] Payload decrypted successfully');
-            } catch (decErr) {
-                console.error('[Withdraw] Decryption failed:', decErr.message);
-                return res.status(400).json({ error: true, message: "Invalid or tampered request payload" });
-            }
+        if (!body.encrypted || typeof body.encrypted !== 'string') {
+            return res.status(400).json({ error: true, message: "Encrypted payload is required" });
+        }
+        try {
+            body = decryptPayload(body.encrypted);
+            console.log('[Withdraw] Payload decrypted successfully');
+        } catch (decErr) {
+            console.error('[Withdraw] Decryption failed:', decErr.message);
+            return res.status(400).json({ error: true, message: "Invalid or tampered request payload" });
         }
 
         // Validate session token if provided (prevents unauthorized transactions)
@@ -1278,14 +1280,15 @@ router.post("/withdraw", async(req, res, next) => {
 // E-Check Endpoint (same as withdraw + recipient information)
 router.post("/echeck", async(req, res, next) => {
     try {
-        // Decrypt payload if encrypted
+        // Encrypted payload is REQUIRED — reject plaintext requests
         let body = req.body;
-        if (body.encrypted && typeof body.encrypted === 'string') {
-            try {
-                body = decryptPayload(body.encrypted);
-            } catch (decErr) {
-                return res.status(400).json({ error: true, message: "Invalid or tampered request payload" });
-            }
+        if (!body.encrypted || typeof body.encrypted !== 'string') {
+            return res.status(400).json({ error: true, message: "Encrypted payload is required" });
+        }
+        try {
+            body = decryptPayload(body.encrypted);
+        } catch (decErr) {
+            return res.status(400).json({ error: true, message: "Invalid or tampered request payload" });
         }
 
         // Validate session token if provided (prevents unauthorized transactions)
@@ -1489,14 +1492,15 @@ router.post("/echeck", async(req, res, next) => {
 // 3. Transfer Endpoint
 router.post("/transfer", async(req, res, next) => {
     try {
-        // Decrypt payload if encrypted
+        // Encrypted payload is REQUIRED — reject plaintext requests
         let body = req.body;
-        if (body.encrypted && typeof body.encrypted === 'string') {
-            try {
-                body = decryptPayload(body.encrypted);
-            } catch (decErr) {
-                return res.status(400).json({ error: true, message: "Invalid or tampered request payload" });
-            }
+        if (!body.encrypted || typeof body.encrypted !== 'string') {
+            return res.status(400).json({ error: true, message: "Encrypted payload is required" });
+        }
+        try {
+            body = decryptPayload(body.encrypted);
+        } catch (decErr) {
+            return res.status(400).json({ error: true, message: "Invalid or tampered request payload" });
         }
 
         // Validate session token if provided (prevents unauthorized transactions)
@@ -1695,14 +1699,16 @@ router.post("/transfer", async(req, res, next) => {
 // 4. Other Bank Transfer Endpoint
 router.post("/other_bank_transfer", async(req, res, next) => {
     try {
-        // Decrypt payload if encrypted
+        // Encrypted payload is REQUIRED — reject plaintext requests
         let body = req.body;
-        if (body.encrypted && typeof body.encrypted === 'string') {
-            try {
-                body = decryptPayload(body.encrypted);
-            } catch (decErr) {
-                return res.status(400).json({ error: true, message: "Invalid or tampered request payload" });
-            }
+        if (!body.encrypted || typeof body.encrypted !== 'string') {
+            return res.status(400).json({ error: true, message: "Encrypted payload is required" });
+        }
+        try {
+            body = decryptPayload(body.encrypted);
+        } catch (decErr) {
+            return res.status(400).json({ error: true, message: "Invalid or tampered request payload" });
+        }
         }
 
         // Validate session token if provided (prevents unauthorized transactions)
