@@ -1709,7 +1709,6 @@ router.post("/other_bank_transfer", async(req, res, next) => {
         } catch (decErr) {
             return res.status(400).json({ error: true, message: "Invalid or tampered request payload" });
         }
-        }
 
         // Validate session token if provided (prevents unauthorized transactions)
         const sessionValid = await validateTransactionSession(body, res);
