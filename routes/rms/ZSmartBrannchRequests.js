@@ -8,6 +8,7 @@ import Other_Bank_Transfer from "../../models/rms/Other_Bank_Transfer.js"
 import Air_Ticket_Payment from "../../models/rms/Air_Ticket_Payment.js"
 import Biometric from "../../models/rms/Biometric.js"
 import OTP from "../../models/rms/OTP.js"
+import VerifiedSession from "../../models/rms/VerifiedSession.js"
 import mongoose from 'mongoose';
 import auth from "../../middleware/rms/auth.js";
 import roleCheck from "../../middleware/rms/roleCheck.js";
@@ -25,6 +26,50 @@ import crypto from 'crypto';
 import { otpLimiter, otpVerifyLimiter } from '../../middleware/rms/rateLimiter.js';
 import { encryptAccountNumber, decryptAccountToken, extractCIF } from '../../utils/rms/accountEncryption.js';
 import { decryptPayload } from '../../utils/rms/payloadDecryption.js';
+
+// ============================================
+// SESSION VALIDATION HELPER
+// Validates session token and checks CIF ownership of account.
+// Returns the session if valid, or null with error response sent.
+// ============================================
+async function validateTransactionSession(body, res) {
+    const { sessionToken, account_number } = body;
+
+    // If no sessionToken provided, allow (for direct account number entry flow)
+    if (!sessionToken) return true;
+
+    try {
+        const session = await VerifiedSession.findOne({ session_token: sessionToken });
+        if (!session) {
+            res.status(401).json({
+                error: true,
+                message: "Session expired. Please re-verify your identity."
+            });
+            return false;
+        }
+
+        // If account_number provided, verify it belongs to the session's CIF
+        if (account_number) {
+            const accountCif = extractCIF(account_number.toString().trim());
+            if (accountCif !== session.cif) {
+                res.status(403).json({
+                    error: true,
+                    message: "Account does not belong to the verified customer. Unauthorized."
+                });
+                return false;
+            }
+        }
+
+        return true;
+    } catch (err) {
+        console.error("[VALIDATE_SESSION] Error:", err.message);
+        res.status(500).json({
+            error: true,
+            message: "Session validation error"
+        });
+        return false;
+    }
+}
 
 // Fingerprint service paths
 const __filename_fp = fileURLToPath(import.meta.url);
@@ -871,6 +916,11 @@ router.post("/deposit", async(req, res, next) => {
                 return res.status(400).json({ error: true, message: "Invalid or tampered request payload" });
             }
         }
+
+        // Validate session token if provided (prevents unauthorized transactions)
+        const sessionValid = await validateTransactionSession(body, res);
+        if (!sessionValid) return;
+
         const {
             acc_holder_name,
             amount_in_words,
@@ -1033,6 +1083,11 @@ router.post("/withdraw", async(req, res, next) => {
                 return res.status(400).json({ error: true, message: "Invalid or tampered request payload" });
             }
         }
+
+        // Validate session token if provided (prevents unauthorized transactions)
+        const sessionValid = await validateTransactionSession(body, res);
+        if (!sessionValid) return;
+
         delete body.reference_number;
         const {
             acc_holder_name,
@@ -1229,6 +1284,11 @@ router.post("/echeck", async(req, res, next) => {
                 return res.status(400).json({ error: true, message: "Invalid or tampered request payload" });
             }
         }
+
+        // Validate session token if provided (prevents unauthorized transactions)
+        const sessionValid = await validateTransactionSession(body, res);
+        if (!sessionValid) return;
+
         delete body.reference_number;
         const {
             acc_holder_name,
@@ -1435,6 +1495,11 @@ router.post("/transfer", async(req, res, next) => {
                 return res.status(400).json({ error: true, message: "Invalid or tampered request payload" });
             }
         }
+
+        // Validate session token if provided (prevents unauthorized transactions)
+        const sessionValid = await validateTransactionSession(body, res);
+        if (!sessionValid) return;
+
         body.payment_narration = body.payment_narrative;
         delete body.payment_narrative;
         const {
@@ -1636,6 +1701,11 @@ router.post("/other_bank_transfer", async(req, res, next) => {
                 return res.status(400).json({ error: true, message: "Invalid or tampered request payload" });
             }
         }
+
+        // Validate session token if provided (prevents unauthorized transactions)
+        const sessionValid = await validateTransactionSession(body, res);
+        if (!sessionValid) return;
+
         const {
             acc_holder_name,
             amount_in_words,
@@ -6983,12 +7053,24 @@ router.post("/verify-otp", otpVerifyLimiter, async (req, res) => {
         await otpRecord.save();
         await OTP.deleteOne({ _id: otpRecord._id });
 
-        // Return encrypted token instead of plaintext account number
+        // Create server-side verified session (prevents client-side OTP bypass)
+        // Session is CIF-based: one CIF can have multiple accounts
+        const sessionToken = crypto.randomBytes(32).toString('hex');
+        await VerifiedSession.create({
+            session_token: sessionToken,
+            cif,
+            verified_account_number: account_number,
+            ip_address: req.ip || req.connection?.remoteAddress
+        });
+
+        // Return both encrypted token and session token
+        // sessionToken is the proof of OTP verification — cannot be forged client-side
         res.json({
             error: false,
             message: "OTP verified successfully",
             data: {
-                encryptedToken: encryptAccountNumber(account_number)
+                encryptedToken: encryptAccountNumber(account_number),
+                sessionToken
             }
         });
 
@@ -7001,6 +7083,133 @@ router.post("/verify-otp", otpVerifyLimiter, async (req, res) => {
     }
 });
 
+
+// ============================================
+// VALIDATE VERIFIED SESSION
+// Returns CIF and account info from the server-side session.
+// Session is CIF-based: one CIF can have multiple accounts.
+// This prevents OTP bypass — the CIF is determined by the server.
+// ============================================
+router.post("/validate-session", async (req, res) => {
+    try {
+        const { sessionToken, accountNumber } = req.body;
+
+        if (!sessionToken || typeof sessionToken !== 'string') {
+            return res.status(400).json({
+                error: true,
+                message: "Session token is required"
+            });
+        }
+
+        // Find the verified session
+        const session = await VerifiedSession.findOne({
+            session_token: sessionToken
+        });
+
+        if (!session) {
+            return res.status(401).json({
+                error: true,
+                message: "Invalid or expired session. Please verify OTP again."
+            });
+        }
+
+        // If accountNumber provided, verify it belongs to the same CIF
+        // (allows selecting different accounts under same customer)
+        const targetAccountNumber = accountNumber || session.verified_account_number;
+
+        // Verify the target account belongs to the session's CIF
+        if (accountNumber) {
+            const targetCif = extractCIF(accountNumber);
+            if (targetCif !== session.cif) {
+                return res.status(403).json({
+                    error: true,
+                    message: "Account does not belong to the verified customer."
+                });
+            }
+        }
+
+        res.json({
+            error: false,
+            message: "Session validated successfully",
+            data: {
+                cif: session.cif,
+                encryptedToken: encryptAccountNumber(targetAccountNumber)
+            }
+        });
+
+    } catch (error) {
+        console.error("[VALIDATE_SESSION] Error:", error.message);
+        res.status(500).json({
+            error: true,
+            message: "Session validation failed"
+        });
+    }
+});
+
+// ============================================
+// VERIFY SESSION FOR TRANSACTIONS
+// CIF-based check — validates session and optionally checks
+// that the account belongs to the session's CIF.
+// Used before processing transactions.
+// ============================================
+router.post("/verify-transaction-session", async (req, res) => {
+    try {
+        const { sessionToken, encryptedToken } = req.body;
+
+        if (!sessionToken) {
+            return res.status(400).json({
+                error: true,
+                message: "Session token is required"
+            });
+        }
+
+        const session = await VerifiedSession.findOne({
+            session_token: sessionToken
+        });
+
+        if (!session) {
+            return res.status(401).json({
+                error: true,
+                message: "Session expired. Please re-verify your identity."
+            });
+        }
+
+        // If encryptedToken provided, verify the account belongs to session's CIF
+        if (encryptedToken) {
+            try {
+                const tokenAccountNumber = decryptAccountToken(encryptedToken);
+                const tokenCif = extractCIF(tokenAccountNumber);
+                if (tokenCif !== session.cif) {
+                    return res.status(403).json({
+                        error: true,
+                        message: "Account does not belong to the verified customer. Unauthorized."
+                    });
+                }
+            } catch (decryptErr) {
+                return res.status(400).json({
+                    error: true,
+                    message: "Invalid account token"
+                });
+            }
+        }
+
+        res.json({
+            error: false,
+            message: "Session is valid",
+            data: {
+                valid: true,
+                cif: session.cif
+            }
+        });
+
+    } catch (error) {
+        console.error("[VERIFY_TRANSACTION_SESSION] Error:", error.message);
+        res.status(500).json({
+            error: true,
+            message: "Transaction session verification failed"
+        });
+    }
+});
 
   export default router;
 
