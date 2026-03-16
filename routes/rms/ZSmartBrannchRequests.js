@@ -2488,7 +2488,8 @@ router.post("/transaction_posted", auth, roleCheck(["Teller"]), async(req, res, 
 
 
 
-router.put("/edit_smart_branch_request", auth, async(req, res, next) => {
+// No auth required — the 10-char alphanumeric reference number is the customer's proof
+router.put("/edit_smart_branch_request", async(req, res, next) => {
     try {
         // Encrypted payload is REQUIRED — reject plaintext requests
         let body = req.body;
@@ -2612,7 +2613,8 @@ router.put("/edit_smart_branch_request", auth, async(req, res, next) => {
 });
 
 // Delete endpoint
-router.delete("/delete_smart_branch_request", auth, async(req, res, next) => {
+// No auth required — the 10-char alphanumeric reference number is the customer's proof
+router.delete("/delete_smart_branch_request", async(req, res, next) => {
     try {
         // Encrypted payload is REQUIRED — reject plaintext requests
         let body = req.body;
@@ -2684,7 +2686,8 @@ router.delete("/delete_smart_branch_request", auth, async(req, res, next) => {
 });
 
 
-router.post("/get_account_number_by_reference_number", auth, async (req, res, next) => {
+// No auth required — customer uses their 10-char reference number to look up requests
+router.post("/get_account_number_by_reference_number", async (req, res, next) => {
     try {
         const { referenceNumber } = req.body;
 
