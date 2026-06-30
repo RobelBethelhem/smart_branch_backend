@@ -3008,114 +3008,55 @@ router.get("/get_assigned_to_me", auth, roleCheck(["Teller", "Maker"]), async(re
             }
         };
 
-        // Fetch transactions from all models
+        // Fetch transactions from all models (parallel, lean, index-backed by
+        // {assigned_to, request_date}).
         const [deposits, withdraws, echecks, transfers, otherBankTransfers, airTicketPayments] = await Promise.all([
             Deposit.find({
                 assigned_to: user.user,
                 ...dateFilter
-            }).sort({ request_date: -1 }),
+            }).sort({ request_date: -1 }).lean(),
 
             Withdraw.find({
                 assigned_to: user.user,
                 ...dateFilter
-            }).sort({ request_date: -1 }),
+            }).sort({ request_date: -1 }).lean(),
 
             ECheck.find({
                 assigned_to: user.user,
                 ...dateFilter
-            }).sort({ request_date: -1 }),
+            }).sort({ request_date: -1 }).lean(),
 
             Transfer.find({
                 assigned_to: user.user,
                 ...dateFilter
-            }).sort({ request_date: -1 }),
+            }).sort({ request_date: -1 }).lean(),
 
             Other_Bank_Transfer.find({
                 assigned_to: user.user,
                 ...dateFilter
-            }).sort({ request_date: -1 }),
+            }).sort({ request_date: -1 }).lean(),
 
             Air_Ticket_Payment.find({
                 assigned_to: user.user,
                 ...dateFilter
-            }).sort({ request_date: -1 })
+            }).sort({ request_date: -1 }).lean()
         ]);
 
-        // Combine all transactions
-        const transformedTransactions = [
-            ...deposits.map(t => ({
-                ...t.toObject(),
-                transactionType: 'deposit'
-            })),
-            ...withdraws.map(t => ({
-                ...t.toObject(),
-                transactionType: 'withdraw'
-            })),
-            ...echecks.map(t => ({
-                ...t.toObject(),
-                transactionType: 'echeck'
-            })),
-            ...transfers.map(t => ({
-                ...t.toObject(),
-                transactionType: 'transfer'
-            })),
-            ...otherBankTransfers.map(t => ({
-                ...t.toObject(),
-                transactionType: 'other_bank_transfer'
-            })),
-            ...airTicketPayments.map(t => ({
-                ...t.toObject(),
-                transactionType: 'air_ticket_payment'
-            }))
-        ];
-
-        // Get unique account numbers
-        const accountNumbers = [...new Set(transformedTransactions.map(t => t.account_number))];
-
-        // Fetch images from Oracle DB
-        const imagesQuery = `
-            SELECT 
-                CA.CUST_AC_NO,
-                CI.IMAGE_TEXT AS PROFILE_IMAGE,
-                SI.SIG_TEXT AS SIGN_IMAGE
-            FROM fcubsprd.STTM_CUST_ACCOUNT CA
-            LEFT JOIN fcubsprd.STTM_CUST_IMAGE CI ON CA.CUST_NO = CI.CUSTOMER_NO
-            LEFT JOIN fcubsprd.svtm_cif_sig_det SI ON CA.CUST_NO = SI.CIF_ID
-            WHERE CA.CUST_AC_NO IN (${accountNumbers.map((_, i) => `:${i + 1}`).join(',')})
-        `;
-
-        const imagesResult = await executeQuery(
-            imagesQuery,
-            accountNumbers,
-            {
-                fetchInfo: {
-                    PROFILE_IMAGE: { type: oracledb.STRING },
-                    SIGN_IMAGE: { type: oracledb.STRING }
-                }
-            }
-        );
-
-        // Create a map of account numbers to their images
-        const accountImages = {};
-        if (imagesResult.success && imagesResult.data) {
-            imagesResult.data.forEach(row => {
-                accountImages[row.CUST_AC_NO] = {
-                    profile_image: row.PROFILE_IMAGE ? 
-                        `data:image/jpeg;base64,${row.PROFILE_IMAGE}` : null,
-                    sign_image: row.SIGN_IMAGE ? 
-                        `data:image/jpeg;base64,${row.SIGN_IMAGE}` : null
-                };
-            });
-        }
-
-        // Add images to transactions and sort by request_date
-        const finalTransactions = transformedTransactions
-            .map(transaction => ({
-                ...transaction,
-                profile_image: accountImages[transaction.account_number]?.profile_image || null,
-                sign_image: accountImages[transaction.account_number]?.sign_image || null
-            }))
-            .sort((a, b) => new Date(b.request_date) - new Date(a.request_date));
+        // Combine all transactions (lean docs are already plain objects).
+        // Images are intentionally NOT fetched here: the per-load Flexcube/Oracle
+        // image lookup (one round-trip + base64 transfer on EVERY load) cannot
+        // survive teller-fleet traffic and was the main source of lag. The result
+        // table never showed these images — profile_image/sign_image are now
+        // fetched ON DEMAND via GET /account_images/:account_number when a teller
+        // opens a row's details.
+        const finalTransactions = [
+            ...deposits.map(t => ({ ...t, transactionType: 'deposit' })),
+            ...withdraws.map(t => ({ ...t, transactionType: 'withdraw' })),
+            ...echecks.map(t => ({ ...t, transactionType: 'echeck' })),
+            ...transfers.map(t => ({ ...t, transactionType: 'transfer' })),
+            ...otherBankTransfers.map(t => ({ ...t, transactionType: 'other_bank_transfer' })),
+            ...airTicketPayments.map(t => ({ ...t, transactionType: 'air_ticket_payment' })),
+        ].sort((a, b) => new Date(b.request_date) - new Date(a.request_date));
 
         // Calculate summary
         const summary = {
