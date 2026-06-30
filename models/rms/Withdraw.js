@@ -359,6 +359,8 @@ withdrawSchema.index({ account_number: 1, request_date: -1 });
 withdrawSchema.index({ branch: 1, status: 1, request_date: -1 });
 withdrawSchema.index({ assigned_to: 1, request_date: -1 });
 withdrawSchema.index({ status: 1, posted_date: -1 });
+// Teller/Admin search-by-customer within today's window (/transactions).
+withdrawSchema.index({ Customer_Unique_Number: 1, request_date: -1 });
 
 const Withdraw = mongoose.model('Withdraw', withdrawSchema);
 export default Withdraw;

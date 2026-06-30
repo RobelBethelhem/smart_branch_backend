@@ -1921,11 +1921,14 @@ router.get("/transactions", auth, roleCheck(["Teller", "Authorizer", "Maker", "A
         // Check the user's role
         if (req.user.roles.includes('Admin')) {
             // Admin can search by account_number, Customer_Unique_Number, or acc_holder_name
+            // Escape the name search so a crafted query can't inject a regex /
+            // trigger ReDoS on the hot path (same case-insensitive substring match).
+            const safeName = String(query).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
             searchQuery = {
                 $or: [
                     { account_number: query },
                     { Customer_Unique_Number: query },
-                    { acc_holder_name: new RegExp(query, 'i') }
+                    { acc_holder_name: new RegExp(safeName, 'i') }
                 ],
                 request_date: {
                     $gte: today,
@@ -1948,69 +1951,34 @@ router.get("/transactions", auth, roleCheck(["Teller", "Authorizer", "Maker", "A
             });
         }
 
-        // Fetch data from all models based on the search query
-        const deposits = await Deposit.find(searchQuery);
-        const withdraws = await Withdraw.find(searchQuery);
-        const echecks = await ECheck.find(searchQuery);
-        const transfers = await Transfer.find(searchQuery);
-        const otherBankTransfers = await Other_Bank_Transfer.find(searchQuery);
-        const airTicketPayments = await Air_Ticket_Payment.find(searchQuery);
+        // Fetch from all collections IN PARALLEL with .lean() (read-only).
+        // The query is index-backed: {Customer_Unique_Number,request_date} for
+        // tellers, {account_number,request_date} + the date window for admins.
+        //
+        // IMPORTANT (scalability): the per-search Oracle/Flexcube image lookup
+        // was REMOVED from this hot path. It meant a Flexcube round-trip + base64
+        // transfer on EVERY search, which cannot survive teller-fleet traffic
+        // (thousands of searches/sec). The result table never showed those
+        // images anyway — profile_image/sign_image are fetched ON DEMAND only
+        // when a teller opens a result's detail (GET /account_images/:account).
+        const [deposits, withdraws, echecks, transfers, otherBankTransfers, airTicketPayments] = await Promise.all([
+            Deposit.find(searchQuery).lean(),
+            Withdraw.find(searchQuery).lean(),
+            ECheck.find(searchQuery).lean(),
+            Transfer.find(searchQuery).lean(),
+            Other_Bank_Transfer.find(searchQuery).lean(),
+            Air_Ticket_Payment.find(searchQuery).lean(),
+        ]);
 
-        // Combine all transactions
-        let transactions = [
+        // Combine (preserve the original merge order).
+        const transactions = [
             ...withdraws,
             ...echecks,
             ...deposits,
             ...transfers,
             ...otherBankTransfers,
-            ...airTicketPayments
+            ...airTicketPayments,
         ];
-
-        // Get unique account numbers from all transactions
-        const accountNumbers = [...new Set(transactions.map(t => t.account_number))];
-
-        // Fetch images for all account numbers in a single query
-        const imagesQuery = `
-            SELECT 
-                CA.CUST_AC_NO,
-                CI.IMAGE_TEXT AS PROFILE_IMAGE,
-                SI.SIG_TEXT AS SIGN_IMAGE
-            FROM fcubsprd.STTM_CUST_ACCOUNT CA
-            LEFT JOIN fcubsprd.STTM_CUST_IMAGE CI ON CA.CUST_NO = CI.CUSTOMER_NO
-            LEFT JOIN fcubsprd.svtm_cif_sig_det SI ON CA.CUST_NO = SI.CIF_ID
-            WHERE CA.CUST_AC_NO IN (${accountNumbers.map((_, i) => `:${i + 1}`).join(',')})
-        `;
-
-        const imagesResult = await executeQuery(
-            imagesQuery,
-            accountNumbers,
-            {
-                fetchInfo: {
-                    PROFILE_IMAGE: { type: oracledb.STRING },
-                    SIGN_IMAGE: { type: oracledb.STRING }
-                }
-            }
-        );
-
-        // Create a map of account numbers to their images
-        const accountImages = {};
-        if (imagesResult.success && imagesResult.data) {
-            imagesResult.data.forEach(row => {
-                accountImages[row.CUST_AC_NO] = {
-                    profile_image: row.PROFILE_IMAGE ? 
-                        `data:image/jpeg;base64,${row.PROFILE_IMAGE}` : null,
-                    sign_image: row.SIGN_IMAGE ? 
-                        `data:image/jpeg;base64,${row.SIGN_IMAGE}` : null
-                };
-            });
-        }
-
-        // Add images to transactions
-        transactions = transactions.map(transaction => ({
-            ...transaction.toObject(), // Convert mongoose document to plain object
-            profile_image: accountImages[transaction.account_number]?.profile_image || null,
-            sign_image: accountImages[transaction.account_number]?.sign_image || null
-        }));
 
         res.status(200).json({
             error: false,
@@ -2023,6 +1991,48 @@ router.get("/transactions", auth, roleCheck(["Teller", "Authorizer", "Maker", "A
             error: true,
             message: "Could not retrieve transactions"
         });
+    }
+});
+
+// On-demand customer images for a single account. Called only when a teller
+// OPENS a search result's details — NOT on every search — so the expensive
+// Flexcube/Oracle image lookup stays off the high-TPS search path.
+router.get("/account_images/:account_number", auth, roleCheck(["Teller", "Authorizer", "Maker", "Admin"]), async (req, res) => {
+    try {
+        const { account_number } = req.params;
+        if (!account_number) {
+            return res.status(400).json({ error: true, message: "account_number is required" });
+        }
+
+        const imagesQuery = `
+            SELECT
+                CA.CUST_AC_NO,
+                CI.IMAGE_TEXT AS PROFILE_IMAGE,
+                SI.SIG_TEXT AS SIGN_IMAGE
+            FROM fcubsprd.STTM_CUST_ACCOUNT CA
+            LEFT JOIN fcubsprd.STTM_CUST_IMAGE CI ON CA.CUST_NO = CI.CUSTOMER_NO
+            LEFT JOIN fcubsprd.svtm_cif_sig_det SI ON CA.CUST_NO = SI.CIF_ID
+            WHERE CA.CUST_AC_NO = :1
+        `;
+        const result = await executeQuery(imagesQuery, [account_number], {
+            fetchInfo: {
+                PROFILE_IMAGE: { type: oracledb.STRING },
+                SIGN_IMAGE: { type: oracledb.STRING },
+            },
+        });
+
+        let profile_image = null;
+        let sign_image = null;
+        if (result.success && result.data && result.data.length > 0) {
+            const row = result.data[0];
+            profile_image = row.PROFILE_IMAGE ? `data:image/jpeg;base64,${row.PROFILE_IMAGE}` : null;
+            sign_image = row.SIGN_IMAGE ? `data:image/jpeg;base64,${row.SIGN_IMAGE}` : null;
+        }
+
+        res.status(200).json({ error: false, data: { profile_image, sign_image } });
+    } catch (e) {
+        console.error("[ACCOUNT_IMAGES] Error:", e.message);
+        res.status(500).json({ error: true, message: "Could not retrieve account images" });
     }
 });
 

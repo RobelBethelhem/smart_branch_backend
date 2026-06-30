@@ -141,6 +141,9 @@ const air_ticket_paymentSchema =  new Schema({
     air_ticket_paymentSchema.index({ branch: 1, status: 1, request_date: -1 });
     air_ticket_paymentSchema.index({ assigned_to: 1, request_date: -1 });
     air_ticket_paymentSchema.index({ status: 1, posted_date: -1 });
+    // Teller/Admin search-by-customer/account within today's window (/transactions).
+    air_ticket_paymentSchema.index({ Customer_Unique_Number: 1, request_date: -1 });
+    air_ticket_paymentSchema.index({ account_number: 1, request_date: -1 });
 
     const Air_Ticket_Payment = mongoose.model('Air_Ticket_Payment', air_ticket_paymentSchema);
     export default Air_Ticket_Payment;

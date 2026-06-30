@@ -243,6 +243,8 @@ transferSchema.index({ account_number: 1, request_date: -1 });
 transferSchema.index({ branch: 1, status: 1, request_date: -1 });
 transferSchema.index({ assigned_to: 1, request_date: -1 });
 transferSchema.index({ status: 1, posted_date: -1 });
+// Teller/Admin search-by-customer within today's window (/transactions).
+transferSchema.index({ Customer_Unique_Number: 1, request_date: -1 });
 
 const Transfer = mongoose.model('Transfer', transferSchema);
 export default Transfer;

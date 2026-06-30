@@ -181,6 +181,9 @@ const other_bank_transferSchema =  new Schema({
     other_bank_transferSchema.index({ branch: 1, status: 1, request_date: -1 });
     other_bank_transferSchema.index({ assigned_to: 1, request_date: -1 });
     other_bank_transferSchema.index({ status: 1, posted_date: -1 });
+    // Teller/Admin search-by-customer/account within today's window (/transactions).
+    other_bank_transferSchema.index({ Customer_Unique_Number: 1, request_date: -1 });
+    other_bank_transferSchema.index({ account_number: 1, request_date: -1 });
 
     const Other_Bank_Transfer = mongoose.model('Other_Bank_Transfer', other_bank_transferSchema);
     export default Other_Bank_Transfer;
