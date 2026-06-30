@@ -123,6 +123,17 @@ initializeOracle(); // Initialize Oracle client and connection pool
 
 app.use(express.json()); // Parse incoming requests data
 
+// Never HTTP-cache API responses. These endpoints are authenticated and
+// per-user, but the browser caches them by URL only (the x-access-token header
+// is not part of the cache key). With Express' default ETag the browser then
+// revalidated and received a 304, re-serving a stale/empty cached body for a
+// shared URL — which surfaced as "no users showing" on /admin/user and is also
+// a cross-user data-leak risk. `no-store` forces a fresh response every time.
+app.use("/api", (req, res, next) => {
+  res.set("Cache-Control", "no-store");
+  next();
+});
+
 // Configure body-parser limits
 
 
