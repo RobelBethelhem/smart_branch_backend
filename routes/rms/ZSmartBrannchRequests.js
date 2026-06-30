@@ -4115,6 +4115,79 @@ router.get("/branch_transactions", auth, async(req, res, next) => {
         const isBranchManagement = req.user.roles.includes('Branch_Management');
         const queryCondition = isBranchManagement ? {} : (isTellerOrMaker ? { assigned_to: user.user } : { branch: user.branch });
 
+        // ===== OPT-IN SERVER-SIDE PAGINATION (table) =====
+        // With start/size, return just one page (+ true totalRowCount) instead of
+        // every transaction. Each collection is already sorted request_date desc,
+        // so capping each at start+size, merging, re-sorting and slicing yields the
+        // correct global page. Oracle images are fetched ONLY for the page's rows.
+        // With no start/size, the original full-response path below runs unchanged.
+        const { start, size } = req.query;
+        const hasPagination = start !== undefined && size !== undefined
+            && !Number.isNaN(Number(start)) && !Number.isNaN(Number(size));
+        if (hasPagination) {
+            const pageModels = [
+                [Deposit, 'deposit'], [Withdraw, 'withdraw'], [ECheck, 'echeck'],
+                [Transfer, 'transfer'], [Other_Bank_Transfer, 'other_bank_transfer'],
+                [Air_Ticket_Payment, 'air_ticket_payment'],
+            ];
+            const cap = Number(start) + Number(size);
+            const perCollection = await Promise.all(
+                pageModels.map(([Model]) => Model.find(queryCondition).sort({ request_date: -1 }).limit(cap).lean())
+            );
+            let merged = [];
+            perCollection.forEach((rows, i) => {
+                const transactionType = pageModels[i][1];
+                for (const r of rows) merged.push({ ...r, transactionType });
+            });
+            merged.sort((a, b) => new Date(b.request_date) - new Date(a.request_date));
+            let pageRows = merged.slice(Number(start), Number(start) + Number(size));
+
+            // Enrich only the page's rows with Oracle images (same query as the full path).
+            const pageAccountNumbers = [...new Set(pageRows.map(t => t.account_number).filter(Boolean))];
+            if (pageAccountNumbers.length > 0) {
+                const imagesQuery = `
+                    SELECT
+                        CA.CUST_AC_NO,
+                        CI.IMAGE_TEXT AS PROFILE_IMAGE,
+                        SI.SIG_TEXT AS SIGN_IMAGE
+                    FROM fcubsprd.STTM_CUST_ACCOUNT CA
+                    LEFT JOIN fcubsprd.STTM_CUST_IMAGE CI ON CA.CUST_NO = CI.CUSTOMER_NO
+                    LEFT JOIN fcubsprd.svtm_cif_sig_det SI ON CA.CUST_NO = SI.CIF_ID
+                    WHERE CA.CUST_AC_NO IN (${pageAccountNumbers.map((_, i) => `:${i + 1}`).join(',')})
+                `;
+                const imagesResult = await executeQuery(imagesQuery, pageAccountNumbers, {
+                    fetchInfo: {
+                        PROFILE_IMAGE: { type: oracledb.STRING },
+                        SIGN_IMAGE: { type: oracledb.STRING },
+                    },
+                });
+                const accountImages = {};
+                if (imagesResult.success && imagesResult.data) {
+                    imagesResult.data.forEach(row => {
+                        accountImages[row.CUST_AC_NO] = {
+                            profile_image: row.PROFILE_IMAGE ? `data:image/jpeg;base64,${row.PROFILE_IMAGE}` : null,
+                            sign_image: row.SIGN_IMAGE ? `data:image/jpeg;base64,${row.SIGN_IMAGE}` : null,
+                        };
+                    });
+                }
+                pageRows = pageRows.map(t => ({
+                    ...t,
+                    profile_image: accountImages[t.account_number]?.profile_image || null,
+                    sign_image: accountImages[t.account_number]?.sign_image || null,
+                }));
+            }
+
+            const counts = await Promise.all(pageModels.map(([Model]) => Model.countDocuments(queryCondition)));
+            const totalRowCount = counts.reduce((a, c) => a + c, 0);
+
+            const pageResponse = { error: false, data: { transactions: pageRows }, meta: { totalRowCount } };
+            if (!isBranchManagement) {
+                pageResponse.data.branch = user.branch;
+                if (isTellerOrMaker) pageResponse.data.assigned_to = user.user;
+            }
+            return res.status(200).json(pageResponse);
+        }
+
         // Fetch all transactions based on the query condition
         const [deposits, withdraws, echecks, transfers, otherBankTransfers, airTicketPayments] = await Promise.all([
             Deposit.find(queryCondition)
@@ -4266,6 +4339,182 @@ router.get("/branch_transactions", auth, async(req, res, next) => {
 
 
 
+
+// ---------------------------------------------------------------------------
+// Server-side aggregates for the Branch Record dashboard charts.
+// This is a FAITHFUL port of the client-side computation that previously ran in
+// src/views/admin/Branch_Record/stat.js (StatisticsTab) and BranchStat.js, so
+// the charts render byte-identically — but it runs over light, projected docs
+// on the server and returns only the small aggregates object, instead of
+// shipping the entire transactions array (with base64 images) to the browser.
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const computeBranchStats = (transactions, branchCode) => {
+    let incomingMoney = 0;
+    let outgoingMoney = 0;
+    let totalAmount = 0;
+    let maxAmount = 0;
+    let minAmount = Infinity;
+    const transactionTypes = {};
+    const statusDistribution = {};
+    const postedByDistribution = {};
+    const userStats = {};
+    const delayMetrics = {};
+    const waitingTimes = [];
+    const hourSlots = {};
+    const dayCounts = {};
+
+    transactions.forEach((tx) => {
+        const amount = parseFloat(tx.amount_in_figures) || 0;
+        const type = tx.transactionType ? tx.transactionType.toLowerCase() : undefined;
+        const status = tx.status || 'unknown';
+        const postedBy = tx.posted_by || 'Unassigned';
+        const beneficiaryBranch = tx.beneficiary_branch || '';
+
+        transactionTypes[type] = (transactionTypes[type] || 0) + 1;
+        statusDistribution[status] = (statusDistribution[status] || 0) + 1;
+        postedByDistribution[postedBy] = (postedByDistribution[postedBy] || 0) + 1;
+
+        // Money classification (identical type-string checks as the client).
+        if (type === 'deposit') {
+            incomingMoney += amount;
+        } else if (type === 'withdraw' || type === 'other-bank-transfer') {
+            outgoingMoney += amount;
+        } else if (type === 'transfer') {
+            if (beneficiaryBranch === branchCode) incomingMoney += amount;
+            else outgoingMoney += amount;
+        }
+
+        // Amount stats (BranchStat).
+        totalAmount += amount;
+        if (amount > maxAmount) maxAmount = amount;
+        if (amount < minAmount) minAmount = amount;
+
+        // Per-user stats.
+        if (!userStats[postedBy]) userStats[postedBy] = { incomingMoney: 0, outgoingMoney: 0, count: 0 };
+        userStats[postedBy].count += 1;
+        if (type === 'deposit' || (type === 'transfer' && beneficiaryBranch === branchCode)) {
+            userStats[postedBy].incomingMoney += amount;
+        } else if (type === 'withdraw' || type === 'other-bank-transfer' || (type === 'transfer' && beneficiaryBranch !== branchCode)) {
+            userStats[postedBy].outgoingMoney += amount;
+        }
+
+        // Posting delay per user (posted_date - assigned_date), minutes.
+        if (tx.assigned_date && tx.posted_date) {
+            const delayMin = (new Date(tx.posted_date) - new Date(tx.assigned_date)) / 60000;
+            if (!isNaN(delayMin) && delayMin >= 0) {
+                if (!delayMetrics[postedBy]) {
+                    delayMetrics[postedBy] = { max: delayMin, min: delayMin, total: delayMin, count: 1 };
+                } else {
+                    delayMetrics[postedBy].max = Math.max(delayMetrics[postedBy].max, delayMin);
+                    delayMetrics[postedBy].min = Math.min(delayMetrics[postedBy].min, delayMin);
+                    delayMetrics[postedBy].total += delayMin;
+                    delayMetrics[postedBy].count += 1;
+                }
+            }
+        }
+
+        // Waiting time (request_date -> assigned_date), rounded minutes (BranchStat).
+        if (tx.request_date && tx.assigned_date) {
+            const diffMin = Math.round((new Date(tx.assigned_date) - new Date(tx.request_date)) / 60000);
+            if (!isNaN(diffMin) && diffMin >= 0) waitingTimes.push(diffMin);
+        }
+
+        // Busy hours (2-hour windows) + busy days (BranchStat).
+        if (tx.request_date) {
+            const d = new Date(tx.request_date);
+            const hour = d.getHours();
+            const slotStart = Math.floor(hour / 2) * 2;
+            const slotEnd = slotStart + 2;
+            const label = `${String(slotStart).padStart(2, '0')}:00 - ${String(slotEnd).padStart(2, '0')}:00`;
+            hourSlots[label] = (hourSlots[label] || 0) + 1;
+            const day = WEEKDAYS[d.getDay()];
+            if (day) dayCounts[day] = (dayCounts[day] || 0) + 1;
+        }
+    });
+
+    // Per-user average delay (return only what the charts read: min/avg/max).
+    const delayMetricsOut = {};
+    Object.entries(delayMetrics).forEach(([user, m]) => {
+        delayMetricsOut[user] = { min: m.min, max: m.max, avg: m.total / m.count };
+    });
+
+    const totalTransactions = transactions.length;
+    if (minAmount === Infinity) minAmount = 0;
+
+    // Waiting-time summary (BranchStat waitStats: avg is toFixed(1) string in the client).
+    let waitStats = { min: 0, max: 0, avg: 0 };
+    if (waitingTimes.length > 0) {
+        waitStats = {
+            min: Math.min(...waitingTimes),
+            max: Math.max(...waitingTimes),
+            avg: (waitingTimes.reduce((a, b) => a + b, 0) / waitingTimes.length).toFixed(1),
+        };
+    }
+
+    return {
+        // StatisticsTab
+        incomingMoney, outgoingMoney, netFlow: incomingMoney - outgoingMoney,
+        transactionTypes, statusDistribution, postedByDistribution,
+        userStats, delayMetrics: delayMetricsOut, totalTransactions,
+        // BranchStat
+        totalAmount, maxAmount, minAmount,
+        avgAmount: totalTransactions > 0 ? totalAmount / totalTransactions : 0,
+        incomingAmount: incomingMoney, outgoingAmount: outgoingMoney,
+        typeCounts: transactionTypes, statusCounts: statusDistribution,
+        hourSlots, dayCounts, waitStats,
+    };
+};
+
+// Lightweight fields needed for the aggregates (NO base64 images / heavy fields).
+const STATS_PROJECTION = {
+    amount_in_figures: 1, status: 1, posted_by: 1, beneficiary_branch: 1,
+    assigned_date: 1, posted_date: 1, request_date: 1,
+};
+
+router.get("/branch_transactions_stats", auth, async (req, res, next) => {
+    try {
+        const user = await User.findById(req.user._id).lean();
+        if (!user) {
+            return res.status(400).json({ error: true, message: "User not found" });
+        }
+
+        const isTellerOrMaker = req.user.roles.includes('Teller') || req.user.roles.includes('Maker');
+        const isBranchManagement = req.user.roles.includes('Branch_Management');
+        const queryCondition = isBranchManagement ? {} : (isTellerOrMaker ? { assigned_to: user.user } : { branch: user.branch });
+        // Match the client: branchCode was '' for Branch_Management (the old endpoint
+        // never set data.branch for that role), else the user's branch.
+        const branchCode = isBranchManagement ? '' : user.branch;
+
+        // Optional date-range filter (same inclusive window the client used).
+        const { from, to } = req.query;
+        const filter = { ...queryCondition };
+        if (from || to) {
+            filter.request_date = {};
+            if (from) filter.request_date.$gte = new Date(from);
+            if (to) filter.request_date.$lte = new Date(`${to}T23:59:59`);
+        }
+
+        const models = [
+            [Deposit, 'deposit'], [Withdraw, 'withdraw'], [ECheck, 'echeck'],
+            [Transfer, 'transfer'], [Other_Bank_Transfer, 'other_bank_transfer'],
+            [Air_Ticket_Payment, 'air_ticket_payment'],
+        ];
+        const results = await Promise.all(
+            models.map(([Model]) => Model.find(filter, STATS_PROJECTION).lean())
+        );
+        const transactions = [];
+        results.forEach((rows, i) => {
+            const transactionType = models[i][1];
+            for (const r of rows) transactions.push({ ...r, transactionType });
+        });
+
+        const stats = computeBranchStats(transactions, branchCode);
+        res.status(200).json({ error: false, data: stats });
+    } catch (e) {
+        console.error("[BRANCH_TRANSACTIONS_STATS] Error:", e.message);
+        res.status(500).json({ error: true, message: "Could not compute statistics" });
+    }
+});
 
 router.get("/till_id", auth, roleCheck(["Admin"]), async(req, res, next) => {
     try {
