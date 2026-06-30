@@ -69,7 +69,6 @@ const transferSchema = new Schema({
     },
     payment_narration: {
         type: String,
-        required: true,
         trim: true,
     },
     trn_ref_no: {

@@ -2627,7 +2627,6 @@ router.put("/edit_smart_branch_request", async(req, res, next) => {
         return res.status(200).json({
             error: false,
             message: "Transaction updated successfully",
-            data: result
         });
 
     } catch (error) {
@@ -2727,7 +2726,7 @@ router.delete("/delete_smart_branch_request", async(req, res, next) => {
         return res.status(200).json({
             error: false,
             message: "Transaction deleted successfully",
-            data: result
+            
         });
 
     } catch (error) {
