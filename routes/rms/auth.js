@@ -126,33 +126,89 @@ router.post("/login", async(req,res)=>{
     
 
 
+// Escape user-supplied text before using it inside a regex filter.
+const escapeUserRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// Shape a user document into the row the back-office grid expects.
+const mapUserRow = (user) => ({
+    id: user._id.toString(), // Convert ObjectId to string
+    first_name: user.first_name,
+    last_name: user.last_name,
+    employee_id: user.employee_id,
+    user: user.user,
+    email: user.email,
+    position: user.position,
+    department: user.department,
+    roles: user.roles,
+});
+
+// Only the fields the grid renders (keeps the password hash and unused fields off the wire).
+const USER_LIST_PROJECTION = { first_name: 1, last_name: 1, employee_id: 1, user: 1, email: 1, position: 1, department: 1, roles: 1 };
+
 router.get("/getUsers", auth, roleCheck(["Admin", "Super_Admin"]), async(req,res)=>{
     try{
-       
         const sendUsers = {};
         const meta = {};
-        const users = await User.find();
-        
-        // Map over the users array to transform the data
-        sendUsers.data = users.map((user) => ({
-          id: user._id.toString(), // Convert ObjectId to string
-          first_name: user.first_name,
-          last_name: user.last_name,
-          employee_id: user.employee_id,
-          user: user.user,
-          email: user.email,
-          position: user.position,
-          department: user.department,
-          roles: user.roles,
-         
-        }));
-        
-        meta.totalRowCount = users.length;
+
+        const { start, size } = req.query;
+        const hasPagination =
+            start !== undefined && size !== undefined &&
+            !Number.isNaN(Number(start)) && !Number.isNaN(Number(size));
+
+        // Backward-compatible: with no start/size, return the full list exactly
+        // as before (the grid filters/sorts/paginates client-side). .lean() +
+        // projection only reduce work — the mapped JSON is identical.
+        if (!hasPagination) {
+            const users = await User.find({}, USER_LIST_PROJECTION).lean();
+            sendUsers.data = users.map(mapUserRow);
+            meta.totalRowCount = users.length;
+            sendUsers.meta = meta;
+            return res.json(sendUsers);
+        }
+
+        // Opt-in server-side filtering + sorting + pagination (material-react-table
+        // "manual" mode). filters/globalFilter/sorting are params the grid already sends.
+        let columnFilters = [];
+        let sorting = [];
+        try { columnFilters = JSON.parse(req.query.filters || '[]'); } catch (_) { columnFilters = []; }
+        try { sorting = JSON.parse(req.query.sorting || '[]'); } catch (_) { sorting = []; }
+        const globalFilter = (req.query.globalFilter || '').trim();
+
+        const and = [];
+        if (Array.isArray(columnFilters)) {
+            for (const f of columnFilters) {
+                if (f && f.id && f.value !== undefined && f.value !== null && String(f.value).length) {
+                    and.push({ [f.id]: { $regex: escapeUserRegex(f.value), $options: 'i' } });
+                }
+            }
+        }
+        if (globalFilter) {
+            const rx = { $regex: escapeUserRegex(globalFilter), $options: 'i' };
+            and.push({ $or: [
+                { first_name: rx }, { last_name: rx }, { employee_id: rx },
+                { user: rx }, { email: rx }, { position: rx }, { department: rx },
+            ] });
+        }
+        const filter = and.length ? { $and: and } : {};
+
+        const sort = {};
+        if (Array.isArray(sorting)) {
+            for (const s of sorting) { if (s && s.id) sort[s.id] = s.desc ? -1 : 1; }
+        }
+
+        let query = User.find(filter, USER_LIST_PROJECTION).lean();
+        if (Object.keys(sort).length) query = query.sort(sort);
+        query = query.skip(Number(start)).limit(Number(size));
+
+        const [users, totalRowCount] = await Promise.all([
+            query,
+            User.countDocuments(filter),
+        ]);
+
+        sendUsers.data = users.map(mapUserRow);
+        meta.totalRowCount = totalRowCount;
         sendUsers.meta = meta;
-        
-    
         res.json(sendUsers);
-       
     }
     catch (err){
         console.error(err);
