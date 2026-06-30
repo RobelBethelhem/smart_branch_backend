@@ -136,6 +136,12 @@ const air_ticket_paymentSchema =  new Schema({
 
 
 
+    // Compound indexes matching the list-screen query+sort shapes (this model
+    // previously had no indexes at all).
+    air_ticket_paymentSchema.index({ branch: 1, status: 1, request_date: -1 });
+    air_ticket_paymentSchema.index({ assigned_to: 1, request_date: -1 });
+    air_ticket_paymentSchema.index({ status: 1, posted_date: -1 });
+
     const Air_Ticket_Payment = mongoose.model('Air_Ticket_Payment', air_ticket_paymentSchema);
     export default Air_Ticket_Payment;
 

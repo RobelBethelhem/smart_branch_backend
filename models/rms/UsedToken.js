@@ -8,5 +8,9 @@ const usedTokenSchema = new Schema({
     },
 });
 
+// The token blacklist is checked on EVERY authenticated request. Without this
+// index that check was a full-collection scan over an ever-growing collection.
+usedTokenSchema.index({ token: 1 });
+
 const UsedToken = mongoose.model("UsedToken", usedTokenSchema);
 export default UsedToken;

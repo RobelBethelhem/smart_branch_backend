@@ -4563,13 +4563,31 @@ router.get("/get_users_per_branch", auth, roleCheck(["Admin"]), async(req, res, 
             return res.status(400).json({ error: true, message: "Branch manager not found" });
         }
 
-        const users = await User.find({ branch: branchManager.branch }).lean();
+        const filter = { branch: branchManager.branch };
+        // Project only the fields the response actually returns — avoids loading
+        // the password hash and any other unused fields into memory / off the wire.
+        const projection = { user: 1, email: 1, roles: 1, till_id: 1, branch: 1, flex_id: 1, created_at: 1 };
 
-        // Diagnostic: shows which admin/branch was resolved and how many users
-        // matched. If this prints 0 (or an empty/blank branch) the account has
-        // no branch-mates — the list is correctly empty, not a bug.
+        // OPT-IN, backward-compatible server-side pagination. With no start/size
+        // the full branch list is returned exactly as before (totalRowCount =
+        // list length). With both, one page is returned plus the true total so a
+        // material-react-table grid can switch to manualPagination when ready.
+        const { start, size } = req.query;
+        const hasPagination = start !== undefined && size !== undefined;
+
+        let query = User.find(filter, projection).lean();
+        if (hasPagination) {
+            query = query.skip(Number(start)).limit(Number(size));
+        }
+        const users = await query;
+
+        const totalRowCount = hasPagination
+            ? await User.countDocuments(filter)
+            : users.length;
+
+        // Diagnostic: shows which admin/branch was resolved and how many users matched.
         console.log(
-            `[get_users_per_branch] admin=${branchManager.user} branch=${JSON.stringify(branchManager.branch)} -> ${users.length} user(s)`
+            `[get_users_per_branch] admin=${branchManager.user} branch=${JSON.stringify(branchManager.branch)} -> ${totalRowCount} user(s)${hasPagination ? ` (page start=${start} size=${size})` : ''}`
         );
 
         // Map users similar to getUsers endpoint
@@ -4582,10 +4600,10 @@ router.get("/get_users_per_branch", auth, roleCheck(["Admin"]), async(req, res, 
             branch: user.branch,
             flex_id: user.flex_id,
             created_at: user.created_at,
-           
+
         }));
 
-        meta.totalRowCount = users.length;
+        meta.totalRowCount = totalRowCount;
         sendUsers.meta = meta;
         res.json(sendUsers);
 

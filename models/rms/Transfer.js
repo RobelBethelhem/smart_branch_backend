@@ -239,6 +239,10 @@ transferSchema.index({ beneficiary_cif: 1 });
 transferSchema.index({ status: 1 });
 // Index on xref already created by unique: true in schema definition
 transferSchema.index({ account_number: 1, request_date: -1 });
+// Compound indexes matching the list-screen query+sort shapes.
+transferSchema.index({ branch: 1, status: 1, request_date: -1 });
+transferSchema.index({ assigned_to: 1, request_date: -1 });
+transferSchema.index({ status: 1, posted_date: -1 });
 
 const Transfer = mongoose.model('Transfer', transferSchema);
 export default Transfer;

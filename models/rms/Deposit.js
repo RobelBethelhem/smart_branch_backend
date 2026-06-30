@@ -304,6 +304,12 @@ depositSchema.index({ customer_cif: 1 });
 depositSchema.index({ status: 1 });
 // Index on xref already created by unique: true in schema definition
 depositSchema.index({ account_number: 1, request_date: -1 });
+// Match the dominant list-screen query shapes (equality fields first, then the
+// descending sort key) so they use an index instead of a collection scan +
+// in-memory sort.
+depositSchema.index({ branch: 1, status: 1, request_date: -1 });
+depositSchema.index({ assigned_to: 1, request_date: -1 });
+depositSchema.index({ status: 1, posted_date: -1 });
 
 const Deposit = mongoose.model('Deposit', depositSchema);
 export default Deposit;

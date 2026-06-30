@@ -82,6 +82,8 @@ const biometricSchema = new Schema({
 // Index for faster lookup by CIF and status
 biometricSchema.index({ cif: 1, status: 1 });
 biometricSchema.index({ branch: 1, status: 1 });
+// my_registrations filters by the enrolling user and sorts by date.
+biometricSchema.index({ registered_by_id: 1, registration_date: -1 });
 
 const Biometric = mongoose.models.Biometric || mongoose.model('Biometric', biometricSchema);
 export default Biometric;

@@ -176,6 +176,12 @@ const other_bank_transferSchema =  new Schema({
     });
 
     
+    // Compound indexes matching the list-screen query+sort shapes (this model
+    // previously had no indexes at all).
+    other_bank_transferSchema.index({ branch: 1, status: 1, request_date: -1 });
+    other_bank_transferSchema.index({ assigned_to: 1, request_date: -1 });
+    other_bank_transferSchema.index({ status: 1, posted_date: -1 });
+
     const Other_Bank_Transfer = mongoose.model('Other_Bank_Transfer', other_bank_transferSchema);
     export default Other_Bank_Transfer;
 

@@ -121,7 +121,9 @@ app.use(express.static(publicDirectory));
 dbConnect();
 initializeOracle(); // Initialize Oracle client and connection pool
 
-app.use(express.json()); // Parse incoming requests data
+// NOTE: express.json() is already registered above (with the JSON-validation
+// `verify` hook), so the duplicate plain express.json() that used to be here was
+// a redundant extra middleware frame on every request — removed.
 
 // Never HTTP-cache API responses. These endpoints are authenticated and
 // per-user, but the browser caches them by URL only (the x-access-token header

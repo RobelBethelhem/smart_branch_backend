@@ -9,9 +9,12 @@ const auth = async (req,res,next) =>{
         return res.status(400).json({error: "true", message: "Access Denied: No token provided"});
     }
 
-    const isUsedToken = await UsedToken.find({token:token});
- 
-    if(isUsedToken.length > 0)
+    // `.exists()` returns a match/null and stops at the first hit (no document
+    // hydration); with the new index on `token` this is a point lookup instead
+    // of a full-collection scan. Same blacklist semantics and check order.
+    const isUsedToken = await UsedToken.exists({token: token});
+
+    if(isUsedToken)
         // return res.redirect('/');
         return res.status(400).json({error: "true", message: "Access Denied: Used token"});
         

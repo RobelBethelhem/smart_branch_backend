@@ -52,6 +52,9 @@ const userSchema =  new Schema({
 
    // const User = mongoose.model("User",userSchema);
 
+    // Speeds branch-scoped user lists (get_users_per_branch) and teller assignment.
+    userSchema.index({ branch: 1, roles: 1 });
+
     const User = mongoose.models.User || mongoose.model('User', userSchema);
     export default User;
 

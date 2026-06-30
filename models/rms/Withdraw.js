@@ -355,6 +355,10 @@ withdrawSchema.index({ customer_cif: 1 });
 withdrawSchema.index({ status: 1 });
 // Index on xref already created by unique: true in schema definition
 withdrawSchema.index({ account_number: 1, request_date: -1 });
+// Compound indexes matching the list-screen query+sort shapes.
+withdrawSchema.index({ branch: 1, status: 1, request_date: -1 });
+withdrawSchema.index({ assigned_to: 1, request_date: -1 });
+withdrawSchema.index({ status: 1, posted_date: -1 });
 
 const Withdraw = mongoose.model('Withdraw', withdrawSchema);
 export default Withdraw;

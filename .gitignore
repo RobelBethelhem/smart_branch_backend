@@ -1,1 +1,8 @@
 /node_modules
+
+# PM2 runtime + logs (volatile files that were getting committed and made
+# `git pull` abort on the server). To untrack the already-committed ones once:
+#   git rm -r --cached y && git commit -m "stop tracking pm2 runtime"
+/y
+*.log
+*.pid
