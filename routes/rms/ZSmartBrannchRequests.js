@@ -4566,6 +4566,13 @@ router.get("/get_users_per_branch", auth, roleCheck(["Admin"]), async(req, res, 
 
         const users = await User.find({ branch: branchManager.branch }).lean();
 
+        // Diagnostic: shows which admin/branch was resolved and how many users
+        // matched. If this prints 0 (or an empty/blank branch) the account has
+        // no branch-mates — the list is correctly empty, not a bug.
+        console.log(
+            `[get_users_per_branch] admin=${branchManager.user} branch=${JSON.stringify(branchManager.branch)} -> ${users.length} user(s)`
+        );
+
         // Map users similar to getUsers endpoint
         sendUsers.data = users.map((user) => ({
             id: user._id.toString(),
