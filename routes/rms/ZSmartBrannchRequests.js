@@ -6507,7 +6507,43 @@ router.post("/process-transfer", auth, async (req, res) => {
             transfer.xref = await Transfer.generateXref();
         }
 
-        // Process directly via SOAP - No limit check, No maker-checker for transfers
+        // ===== Maker-checker threshold (same rule as withdraw / echeck) =====
+        // Amount >= threshold: save to Mongo as pending_checker and DO NOT post to
+        // Flexcube. A checker (authorizer) approves it later in Pending Checker
+        // Approval, and THAT is what posts it to Flexcube (see /approve-pending-transaction).
+        const checkerCheck = await FlexcubeTransactionService.checkMakerCheckerThreshold(amount);
+        transfer.needs_checker = checkerCheck.needsChecker;
+        transfer.checker_threshold = checkerCheck.threshold;
+
+        if (checkerCheck.needsChecker) {
+            transfer.status = 'pending_checker';
+            transfer.maker_name = posted_by || req.user?.name;
+            transfer.maker_id = req.user?.userId || req.user?.id;
+            transfer.maker_date = new Date();
+            transfer.maker_remarks = remarks || '';
+            transfer.posted_by = posted_by || req.user?.name;
+            transfer.posted_date = new Date();
+            await transfer.save();
+
+            console.log('[TRANSFER_ROUTE] Requires CHECKER APPROVAL - amount', amount, '>= threshold', checkerCheck.threshold, '- saved as pending_checker (NOT posted to Flexcube)');
+
+            return res.status(200).json({
+                error: false,
+                message: `Transaction requires checker approval (amount ${amount} >= threshold ${checkerCheck.threshold})`,
+                data: {
+                    transfer,
+                    needsChecker: true,
+                    status: 'pending_checker',
+                    maker: {
+                        name: transfer.maker_name,
+                        id: transfer.maker_id,
+                        date: transfer.maker_date
+                    }
+                }
+            });
+        }
+
+        // No checker needed (amount < threshold) - process directly via SOAP
         console.log('\n' + '='.repeat(80));
         console.log('[TRANSFER_ROUTE] Processing transfer');
         console.log('='.repeat(80));
@@ -6635,18 +6671,20 @@ router.get("/pending-checker-transactions", auth, async (req, res) => {
             query.branch = branch;
         }
 
-        // Get pending deposits, withdrawals, and echecks
-        const [pendingDeposits, pendingWithdraws, pendingEChecks] = await Promise.all([
+        // Get pending deposits, withdrawals, echecks and transfers
+        const [pendingDeposits, pendingWithdraws, pendingEChecks, pendingTransfers] = await Promise.all([
             Deposit.find(query).sort({ posted_date: -1 }),
             Withdraw.find(query).sort({ posted_date: -1 }),
-            ECheck.find(query).sort({ posted_date: -1 })
+            ECheck.find(query).sort({ posted_date: -1 }),
+            Transfer.find(query).sort({ posted_date: -1 })
         ]);
 
         // Combine and add type field
         const pendingTransactions = [
             ...pendingDeposits.map(d => ({ ...d.toObject(), transaction_type: 'Deposit' })),
             ...pendingWithdraws.map(w => ({ ...w.toObject(), transaction_type: 'Withdraw' })),
-            ...pendingEChecks.map(e => ({ ...e.toObject(), transaction_type: 'ECheck' }))
+            ...pendingEChecks.map(e => ({ ...e.toObject(), transaction_type: 'ECheck' })),
+            ...pendingTransfers.map(t => ({ ...t.toObject(), transaction_type: 'Transfer' }))
         ].sort((a, b) => new Date(b.posted_date) - new Date(a.posted_date));
 
         res.status(200).json({
@@ -6699,6 +6737,8 @@ router.post("/approve-pending-transaction", auth, async (req, res) => {
             transaction = await Withdraw.findById(transaction_id);
         } else if (transaction_type === 'ECheck' || transaction_type === 'E-Check') {
             transaction = await ECheck.findById(transaction_id);
+        } else if (transaction_type === 'Transfer') {
+            transaction = await Transfer.findById(transaction_id);
         } else {
             return res.status(400).json({
                 error: true,
@@ -6798,6 +6838,17 @@ router.post("/approve-pending-transaction", auth, async (req, res) => {
                 glAccount: '101101',
                 xref: transaction.xref,
                 narrative: `WITHDRAW-${transaction.account_number}-MAKER-${transaction.maker_name || transaction.posted_by}-CHECKER-${transaction.checker_name}`
+            });
+        } else if (transaction_type === 'Transfer') {
+            // Post the transfer to Flexcube now that the checker has approved it
+            // (same SOAP call the teller would have made below-threshold).
+            soapResult = await FlexcubeTransactionService.createTransferTransaction({
+                fromAccount: transaction.account_number,
+                toAccount: transaction.beneficiary_account_number,
+                amount: amount,
+                tellerBranch: transaction.branch || FlexcubeTransactionService.extractBranchFromAccount(transaction.account_number),
+                xref: transaction.xref,
+                narrative: transaction.payment_narration || `TRANSFER-${transaction.account_number}-TO-${transaction.beneficiary_account_number}-MAKER-${transaction.maker_name || transaction.posted_by}-CHECKER-${transaction.checker_name}`
             });
         } else {
             // Deposit - should not normally reach here as deposits don't need checker

@@ -177,7 +177,28 @@ const transferSchema = new Schema({
         type: Number,
         default: 0,
     },
+    // Maker (Initiator) information - the teller who initiated a pending transfer
+    maker_name: {
+        type: String,
+        trim: true,
+    },
+    maker_id: {
+        type: String,
+        trim: true,
+    },
+    maker_date: {
+        type: Date,
+    },
+    maker_remarks: {
+        type: String,
+        trim: true,
+    },
+    // Checker (Authorizer) information
     checker_name: {
+        type: String,
+        trim: true,
+    },
+    checker_id: {
         type: String,
         trim: true,
     },
@@ -187,6 +208,11 @@ const transferSchema = new Schema({
     checker_remarks: {
         type: String,
         trim: true,
+    },
+    checker_action: {
+        type: String,
+        enum: ['approved', 'rejected', null],
+        default: null,
     },
 
     // NEW: SOAP transaction response
