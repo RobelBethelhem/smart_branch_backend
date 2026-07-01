@@ -139,13 +139,14 @@ const mapUserRow = (user) => ({
     email: user.email,
     position: user.position,
     department: user.department,
+    branch: user.branch,
     roles: user.roles,
 });
 
 // Only the fields the grid renders (keeps the password hash and unused fields off the wire).
-const USER_LIST_PROJECTION = { first_name: 1, last_name: 1, employee_id: 1, user: 1, email: 1, position: 1, department: 1, roles: 1 };
+const USER_LIST_PROJECTION = { first_name: 1, last_name: 1, employee_id: 1, user: 1, email: 1, position: 1, department: 1, branch: 1, roles: 1 };
 
-router.get("/getUsers", auth, roleCheck(["Admin", "Super_Admin"]), async(req,res)=>{
+router.get("/getUsers", auth, roleCheck(["Admin", "Super_Admin", "Branch_Management"]), async(req,res)=>{
     try{
         const sendUsers = {};
         const meta = {};
@@ -216,6 +217,62 @@ router.get("/getUsers", auth, roleCheck(["Admin", "Super_Admin"]), async(req,res
     }
 });
 
+
+// Create a branch Admin user. Used by Branch_Management (and Super_Admin) to
+// onboard branch admins WITHOUT the RMS site_id coupling of /signUp. The role
+// is FORCED to 'Admin', so Branch_Management can only ever create Admins.
+router.post("/create_admin", auth, roleCheck(["Branch_Management", "Super_Admin"]), async (req, res) => {
+    try {
+        const { user, email, branch } = req.body;
+        if (!user || !email || !branch) {
+            return res.status(400).json({ error: true, message: "user, email and branch are required" });
+        }
+        const existing = await User.findOne({ email });
+        if (existing) {
+            return res.status(400).json({ error: true, message: "User with given email already exists" });
+        }
+        const salt = await bcrypt.genSalt(Number(process.env.SALT));
+        const hashPassword = await bcrypt.hash("@Test1234", salt);
+        const newUser = await new User({
+            user,
+            email,
+            branch: String(branch),
+            roles: ["Admin"],   // forced — Branch_Management can only create Admins
+            password: hashPassword,
+        }).save();
+        res.status(201).json({
+            error: false,
+            message: "Admin user created successfully",
+            data: {
+                id: newUser._id.toString(),
+                user: newUser.user,
+                email: newUser.email,
+                branch: newUser.branch,
+                roles: newUser.roles,
+            },
+        });
+    } catch (e) {
+        console.error("[CREATE_ADMIN] Error:", e.message);
+        if (e.code === 11000) {
+            return res.status(400).json({ error: true, message: "A user with this email already exists" });
+        }
+        res.status(500).json({ error: true, message: "Internal Server Error" });
+    }
+});
+
+// Distinct branch codes — feeds the Branch_Management "Branches Record" dropdown.
+router.get("/branches", auth, roleCheck(["Branch_Management", "Admin", "Super_Admin"]), async (req, res) => {
+    try {
+        const branches = (await User.distinct("branch"))
+            .filter((b) => b !== null && b !== undefined && String(b).trim() !== "")
+            .map((b) => String(b))
+            .sort();
+        res.status(200).json({ error: false, data: branches });
+    } catch (e) {
+        console.error("[BRANCHES] Error:", e.message);
+        res.status(500).json({ error: true, message: "Could not load branches" });
+    }
+});
 
 // editing the user
 router.patch("/editUser", auth, roleCheck(["Admin", "Super_Admin"]), async(req,res)=>{

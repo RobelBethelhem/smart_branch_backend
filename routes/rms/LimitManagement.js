@@ -15,7 +15,7 @@ const router = express.Router();
  * GET /customer-category-limits
  * Get all customer category limits
  */
-router.get("/customer-category-limits", auth, roleCheck(["Admin"]), async (req, res) => {
+router.get("/customer-category-limits", auth, roleCheck(["Branch_Management"]), async (req, res) => {
     try {
         const limits = await CustomerCategoryLimit.find()
             .sort({ customer_category: 1 });
@@ -38,7 +38,7 @@ router.get("/customer-category-limits", auth, roleCheck(["Admin"]), async (req, 
  * GET /customer-category-limits/:id
  * Get a single customer category limit by ID
  */
-router.get("/customer-category-limits/:id", auth, roleCheck(["Admin"]), async (req, res) => {
+router.get("/customer-category-limits/:id", auth, roleCheck(["Branch_Management"]), async (req, res) => {
     try {
         const limit = await CustomerCategoryLimit.findById(req.params.id);
 
@@ -67,7 +67,7 @@ router.get("/customer-category-limits/:id", auth, roleCheck(["Admin"]), async (r
  * POST /customer-category-limits
  * Create a new customer category limit
  */
-router.post("/customer-category-limits", auth, roleCheck(["Admin"]), async (req, res) => {
+router.post("/customer-category-limits", auth, roleCheck(["Branch_Management"]), async (req, res) => {
     try {
         const { customer_category, daily_limit, currency, created_by, created_by_id } = req.body;
 
@@ -118,7 +118,7 @@ router.post("/customer-category-limits", auth, roleCheck(["Admin"]), async (req,
  * PUT /customer-category-limits/:id
  * Update a customer category limit
  */
-router.put("/customer-category-limits/:id", auth, roleCheck(["Admin"]), async (req, res) => {
+router.put("/customer-category-limits/:id", auth, roleCheck(["Branch_Management"]), async (req, res) => {
     try {
         const { customer_category, daily_limit, currency, is_active, updated_by, updated_by_id } = req.body;
 
@@ -170,7 +170,7 @@ router.put("/customer-category-limits/:id", auth, roleCheck(["Admin"]), async (r
  * DELETE /customer-category-limits/:id
  * Delete a customer category limit
  */
-router.delete("/customer-category-limits/:id", auth, roleCheck(["Admin"]), async (req, res) => {
+router.delete("/customer-category-limits/:id", auth, roleCheck(["Branch_Management"]), async (req, res) => {
     try {
         const limit = await CustomerCategoryLimit.findByIdAndDelete(req.params.id);
 
@@ -203,7 +203,7 @@ router.delete("/customer-category-limits/:id", auth, roleCheck(["Admin"]), async
  * GET /maker-checker-threshold
  * Get the current maker-checker threshold (returns the active one)
  */
-router.get("/maker-checker-threshold", auth, roleCheck(["Admin"]), async (req, res) => {
+router.get("/maker-checker-threshold", auth, roleCheck(["Branch_Management"]), async (req, res) => {
     try {
         // Get the active threshold (there should only be one)
         let threshold = await MakerCheckerThreshold.findOne({ is_active: true });
@@ -241,7 +241,7 @@ router.get("/maker-checker-threshold", auth, roleCheck(["Admin"]), async (req, r
  * POST /maker-checker-threshold
  * Create or update the maker-checker threshold
  */
-router.post("/maker-checker-threshold", auth, roleCheck(["Admin"]), async (req, res) => {
+router.post("/maker-checker-threshold", auth, roleCheck(["Branch_Management"]), async (req, res) => {
     try {
         const { threshold_amount, currency, description, created_by, created_by_id } = req.body;
 
@@ -288,7 +288,7 @@ router.post("/maker-checker-threshold", auth, roleCheck(["Admin"]), async (req, 
  * PUT /maker-checker-threshold/:id
  * Update an existing maker-checker threshold
  */
-router.put("/maker-checker-threshold/:id", auth, roleCheck(["Admin"]), async (req, res) => {
+router.put("/maker-checker-threshold/:id", auth, roleCheck(["Branch_Management"]), async (req, res) => {
     try {
         const { threshold_amount, currency, description, is_active, updated_by, updated_by_id } = req.body;
 
@@ -343,7 +343,7 @@ router.put("/maker-checker-threshold/:id", auth, roleCheck(["Admin"]), async (re
  * GET /flexcube/customer-categories
  * Fetch distinct customer categories from Flexcube STTM_CUSTOMER table
  */
-router.get("/flexcube/customer-categories", auth, roleCheck(["Admin"]), async (req, res) => {
+router.get("/flexcube/customer-categories", auth, roleCheck(["Branch_Management"]), async (req, res) => {
     try {
         const query = `
             SELECT DISTINCT CUSTOMER_CATEGORY

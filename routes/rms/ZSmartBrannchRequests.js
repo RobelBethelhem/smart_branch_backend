@@ -4065,7 +4065,20 @@ router.get("/branch_transactions", auth, async(req, res, next) => {
         // Determine the query condition based on user role
         const isTellerOrMaker = req.user.roles.includes('Teller') || req.user.roles.includes('Maker');
         const isBranchManagement = req.user.roles.includes('Branch_Management');
-        const queryCondition = isBranchManagement ? {} : (isTellerOrMaker ? { assigned_to: user.user } : { branch: user.branch });
+        // Branch_Management can view a SELECTED branch (?branch=CODE); with none it
+        // sees all branches (unchanged). Other roles are scoped as before.
+        const queryCondition = isBranchManagement
+            ? (req.query.branch ? { branch: req.query.branch } : {})
+            : (isTellerOrMaker ? { assigned_to: user.user } : { branch: user.branch });
+
+        // Optional date-range filter (used by the Branches Record view). Other
+        // callers pass no from/to, so their behaviour is unchanged.
+        const { from: fromDate, to: toDate } = req.query;
+        if (fromDate || toDate) {
+            queryCondition.request_date = {};
+            if (fromDate) queryCondition.request_date.$gte = new Date(fromDate);
+            if (toDate) queryCondition.request_date.$lte = new Date(`${toDate}T23:59:59`);
+        }
 
         // ===== OPT-IN SERVER-SIDE PAGINATION (table) =====
         // With start/size, return just one page (+ true totalRowCount) instead of
@@ -4432,10 +4445,14 @@ router.get("/branch_transactions_stats", auth, async (req, res, next) => {
 
         const isTellerOrMaker = req.user.roles.includes('Teller') || req.user.roles.includes('Maker');
         const isBranchManagement = req.user.roles.includes('Branch_Management');
-        const queryCondition = isBranchManagement ? {} : (isTellerOrMaker ? { assigned_to: user.user } : { branch: user.branch });
-        // Match the client: branchCode was '' for Branch_Management (the old endpoint
-        // never set data.branch for that role), else the user's branch.
-        const branchCode = isBranchManagement ? '' : user.branch;
+        // Branch_Management can view a SELECTED branch (?branch=CODE); with none it
+        // aggregates all branches (unchanged). Other roles are scoped as before.
+        const queryCondition = isBranchManagement
+            ? (req.query.branch ? { branch: req.query.branch } : {})
+            : (isTellerOrMaker ? { assigned_to: user.user } : { branch: user.branch });
+        // branchCode drives the transfer in/out money classification: use the
+        // selected branch when one is chosen, else '' (all branches, as before).
+        const branchCode = isBranchManagement ? (req.query.branch || '') : user.branch;
 
         // Optional date-range filter (same inclusive window the client used).
         const { from, to } = req.query;
