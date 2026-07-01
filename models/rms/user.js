@@ -38,10 +38,17 @@ const userSchema =  new Schema({
         type: Date,
         default: new Date()
     },
-    password: { 
+    password: {
         type: String,
         required: true,
         default: "$2b$10$SEfTATgmvwERsC4ID3TKgebRUJ03yId2hVZeALA22Zq.QAVj4CYV."
+    },
+
+    // Soft-delete flag. When false, the user is blocked at /login. Existing
+    // documents have no `active` field (undefined) and are treated as active.
+    active: {
+        type: Boolean,
+        default: true,
     },
 
     // Created_by:{
