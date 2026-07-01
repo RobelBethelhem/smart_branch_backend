@@ -3287,34 +3287,35 @@ router.get("/get_authorized_data", auth, roleCheck(["Auditor","Teller"]), async(
             }
         };
 
-        // Fetch transactions from all models with status 'authorized' and matching branch
+        // Fetch this branch's transactions the Auditor can act on: status
+        // 'posted' OR 'authorized' (the audit step accepts both), matching branch.
         const [deposits, withdraws, transfers, otherBankTransfers, airTicketPayments] = await Promise.all([
             Deposit.find({ 
-                status: 'authorized',
+                status: { $in: ['posted', 'authorized'] },
                 branch: user.branch,
                 ...dateFilter
             }).sort({ request_date: -1 }),
             
             Withdraw.find({ 
-                status: 'authorized',
+                status: { $in: ['posted', 'authorized'] },
                 branch: user.branch,
                 ...dateFilter
             }).sort({ request_date: -1 }),
             
             Transfer.find({ 
-                status: 'authorized',
+                status: { $in: ['posted', 'authorized'] },
                 branch: user.branch,
                 ...dateFilter
             }).sort({ request_date: -1 }),
             
             Other_Bank_Transfer.find({ 
-                status: 'authorized',
+                status: { $in: ['posted', 'authorized'] },
                 branch: user.branch,
                 ...dateFilter
             }).sort({ request_date: -1 }),
             
             Air_Ticket_Payment.find({ 
-                status: 'authorized',
+                status: { $in: ['posted', 'authorized'] },
                 branch: user.branch,
                 ...dateFilter
             }).sort({ request_date: -1 })
