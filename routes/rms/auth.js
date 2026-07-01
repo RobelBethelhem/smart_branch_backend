@@ -37,7 +37,7 @@ router.post("/verify-token", async(req,res)=>{
     }
 })
 
-router.post("/signUp", auth, roleCheck(["Admin", "Super_Admin"]), async(req,res)=>{
+router.post("/signUp", auth, roleCheck(["Admin"]), async(req,res)=>{
     try{
         delete req.body.id;
         req.body.password = "@Test1234";
@@ -225,10 +225,10 @@ router.get("/getUsers", auth, roleCheck(["Admin", "Super_Admin", "Branch_Managem
 });
 
 
-// Create a branch Admin user. Used by Branch_Management (and Super_Admin) to
-// onboard branch admins WITHOUT the RMS site_id coupling of /signUp. The role
-// is FORCED to 'Admin', so Branch_Management can only ever create Admins.
-router.post("/create_admin", auth, roleCheck(["Branch_Management", "Super_Admin"]), async (req, res) => {
+// Create a branch Admin user. Used by Branch_Management to onboard branch admins
+// WITHOUT the RMS site_id coupling of /signUp. The role is FORCED to 'Admin', so
+// Branch_Management can only ever create Admins.
+router.post("/create_admin", auth, roleCheck(["Branch_Management"]), async (req, res) => {
     try {
         const { user, email, branch } = req.body;
         if (!user || !email || !branch) {
@@ -267,6 +267,49 @@ router.post("/create_admin", auth, roleCheck(["Branch_Management", "Super_Admin"
     }
 });
 
+// Create a Branch_Management user. Used by Super_Admin ONLY. The role is FORCED
+// to 'Branch_Management', so Super_Admin can only ever create Branch_Management
+// users. Branch is optional (Branch_Management is cross-branch) and defaults to
+// "HQ" to satisfy the required schema field.
+router.post("/create_branch_management", auth, roleCheck(["Super_Admin"]), async (req, res) => {
+    try {
+        const { user, email, branch } = req.body;
+        if (!user || !email) {
+            return res.status(400).json({ error: true, message: "user and email are required" });
+        }
+        const existing = await User.findOne({ email });
+        if (existing) {
+            return res.status(400).json({ error: true, message: "User with given email already exists" });
+        }
+        const salt = await bcrypt.genSalt(Number(process.env.SALT));
+        const hashPassword = await bcrypt.hash("@Test1234", salt);
+        const newUser = await new User({
+            user,
+            email,
+            branch: String(branch || "HQ"),
+            roles: ["Branch_Management"],   // forced — Super_Admin can only create Branch_Management
+            password: hashPassword,
+        }).save();
+        res.status(201).json({
+            error: false,
+            message: "Branch_Management user created successfully",
+            data: {
+                id: newUser._id.toString(),
+                user: newUser.user,
+                email: newUser.email,
+                branch: newUser.branch,
+                roles: newUser.roles,
+            },
+        });
+    } catch (e) {
+        console.error("[CREATE_BRANCH_MANAGEMENT] Error:", e.message);
+        if (e.code === 11000) {
+            return res.status(400).json({ error: true, message: "A user with this email already exists" });
+        }
+        res.status(500).json({ error: true, message: "Internal Server Error" });
+    }
+});
+
 // Distinct branch codes — feeds the Branch_Management "Branches Record" dropdown.
 router.get("/branches", auth, roleCheck(["Branch_Management", "Admin", "Super_Admin"]), async (req, res) => {
     try {
@@ -280,6 +323,22 @@ router.get("/branches", auth, roleCheck(["Branch_Management", "Admin", "Super_Ad
         res.status(500).json({ error: true, message: "Could not load branches" });
     }
 });
+
+// A managed creator may only act on users within its scope: Super_Admin manages
+// only Branch_Management users; Branch_Management manages only Admins. Admin is
+// unrestricted. Returns an error message if the requester may NOT manage the
+// given target, or null if allowed.
+const managementScopeError = (reqRoles, targetRoles) => {
+    const t = Array.isArray(targetRoles) ? targetRoles : [];
+    if (reqRoles.includes("Admin")) return null;                 // Admin manages anyone
+    if (reqRoles.includes("Super_Admin")) {
+        return t.includes("Branch_Management") ? null : "Super_Admin can only manage Branch_Management users";
+    }
+    if (reqRoles.includes("Branch_Management")) {
+        return t.includes("Admin") ? null : "Branch_Management can only manage Admin users";
+    }
+    return null;
+};
 
 // editing the user. Only the fields actually sent are updated (partial update),
 // so existing callers that send {id, email, roles} keep working, while
@@ -295,6 +354,28 @@ router.patch("/editUser", auth, roleCheck(["Admin", "Super_Admin", "Branch_Manag
         if (branch !== undefined) updatedData.branch = String(branch);
         if (roles !== undefined) updatedData.roles = Array.isArray(roles) ? roles : [roles];
         if (active !== undefined) updatedData.active = active;
+
+        // Scope guard: Super_Admin may only manage Branch_Management users and
+        // Branch_Management may only manage Admins — enforced on BOTH the target
+        // user (so they can't touch an out-of-scope user by omitting `roles`) AND
+        // the role being assigned (so they can't move a user out of scope). Admin
+        // is unaffected. The UI already locks this; this is the API-level guard.
+        const reqRoles = Array.isArray(req.user?.roles) ? req.user.roles : [];
+        if (!reqRoles.includes("Admin")) {
+            const target = await User.findById(id, { roles: 1 }).lean();
+            if (!target) return res.status(404).json({ error: true, message: "User not found" });
+            const scopeErr = managementScopeError(reqRoles, target.roles);
+            if (scopeErr) return res.status(403).json({ error: true, message: scopeErr });
+            if (updatedData.roles) {
+                const onlyRole = updatedData.roles.length === 1 ? updatedData.roles[0] : null;
+                if (reqRoles.includes("Super_Admin") && onlyRole !== "Branch_Management") {
+                    return res.status(403).json({ error: true, message: "Super_Admin can only manage Branch_Management users" });
+                }
+                if (reqRoles.includes("Branch_Management") && onlyRole !== "Admin") {
+                    return res.status(403).json({ error: true, message: "Branch_Management can only manage Admin users" });
+                }
+            }
+        }
 
         const updatedUser = await User.findByIdAndUpdate(id, updatedData, {
             new: true
@@ -318,6 +399,15 @@ router.patch("/set_user_active", auth, roleCheck(["Admin", "Super_Admin", "Branc
         if (!id || typeof active !== "boolean") {
             return res.status(400).json({error: true, message: "id and a boolean `active` are required"});
         }
+        // Scope guard (see editUser): a managed creator may only (de)activate
+        // users within its scope. Admin is unrestricted.
+        const reqRoles = Array.isArray(req.user?.roles) ? req.user.roles : [];
+        if (!reqRoles.includes("Admin")) {
+            const target = await User.findById(id, { roles: 1 }).lean();
+            if (!target) return res.status(404).json({error: true, message: "User not found"});
+            const scopeErr = managementScopeError(reqRoles, target.roles);
+            if (scopeErr) return res.status(403).json({error: true, message: scopeErr});
+        }
         const updated = await User.findByIdAndUpdate(id, { active }, { new: true });
         if (!updated) return res.status(404).json({error: true, message: "User not found"});
         res.status(200).json({
@@ -334,7 +424,7 @@ router.patch("/set_user_active", auth, roleCheck(["Admin", "Super_Admin", "Branc
 
 
 
-router.delete("/deleteUser", auth, roleCheck(["Admin", "Super_Admin"]), async(req,res)=>{
+router.delete("/deleteUser", auth, roleCheck(["Admin"]), async(req,res)=>{
     try{
         const userId = req.body.id;
         const deletedUser = await User.findByIdAndDelete(userId)
