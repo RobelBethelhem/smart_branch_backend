@@ -111,6 +111,11 @@ router.post("/login", async(req,res)=>{
         if(!verifiedPassword)
             return res.status(401).json({error: true, message: "Invalid Password"})
 
+        // Soft-deleted users (active:false) cannot log in. Existing accounts have
+        // no `active` field (undefined) and are treated as active.
+        if(user.active === false)
+            return res.status(403).json({error: true, message: "Your account has been deactivated. Please contact your branch management."})
+
         //generate access and refresh token
         const {accessToken, refreshToken} = await generateTokens(user);
         res.status(200).json({error: false, accessToken, refreshToken, message: "Logged in Successfully"});
@@ -141,10 +146,12 @@ const mapUserRow = (user) => ({
     department: user.department,
     branch: user.branch,
     roles: user.roles,
+    // Undefined (legacy docs) is treated as active.
+    active: user.active !== false,
 });
 
 // Only the fields the grid renders (keeps the password hash and unused fields off the wire).
-const USER_LIST_PROJECTION = { first_name: 1, last_name: 1, employee_id: 1, user: 1, email: 1, position: 1, department: 1, branch: 1, roles: 1 };
+const USER_LIST_PROJECTION = { first_name: 1, last_name: 1, employee_id: 1, user: 1, email: 1, position: 1, department: 1, branch: 1, roles: 1, active: 1 };
 
 router.get("/getUsers", auth, roleCheck(["Admin", "Super_Admin", "Branch_Management"]), async(req,res)=>{
     try{
@@ -274,17 +281,22 @@ router.get("/branches", auth, roleCheck(["Branch_Management", "Admin", "Super_Ad
     }
 });
 
-// editing the user
-router.patch("/editUser", auth, roleCheck(["Admin", "Super_Admin"]), async(req,res)=>{
+// editing the user. Only the fields actually sent are updated (partial update),
+// so existing callers that send {id, email, roles} keep working, while
+// Branch_Management can also update {user, branch}.
+router.patch("/editUser", auth, roleCheck(["Admin", "Super_Admin", "Branch_Management"]), async(req,res)=>{
     try{
-        const {id, name, email, roles} = req.body;
-      
-        const updatedData = {
-            name: name,
-            email: email,
-            roles: roles
-        }
-        const updatedUser = await User.findByIdAndUpdate(id,updatedData,{
+        const {id, name, user, email, branch, roles, active} = req.body;
+
+        const updatedData = {};
+        if (user !== undefined) updatedData.user = user;
+        if (name !== undefined) updatedData.name = name;       // legacy field (not in schema) — harmless
+        if (email !== undefined) updatedData.email = email;
+        if (branch !== undefined) updatedData.branch = String(branch);
+        if (roles !== undefined) updatedData.roles = Array.isArray(roles) ? roles : [roles];
+        if (active !== undefined) updatedData.active = active;
+
+        const updatedUser = await User.findByIdAndUpdate(id, updatedData, {
             new: true
         })
 
@@ -293,6 +305,29 @@ router.patch("/editUser", auth, roleCheck(["Admin", "Super_Admin"]), async(req,r
     }
     catch (error){
         console.error("Error: ", error);
+        res.status(500).json({error: true, message: "Internal Server Error"});
+    }
+})
+
+// Soft-delete: Branch_Management (and admins) deactivate a user instead of
+// hard-deleting. A deactivated user (active:false) is blocked at /login and can
+// be reactivated the same way.
+router.patch("/set_user_active", auth, roleCheck(["Admin", "Super_Admin", "Branch_Management"]), async(req,res)=>{
+    try{
+        const {id, active} = req.body;
+        if (!id || typeof active !== "boolean") {
+            return res.status(400).json({error: true, message: "id and a boolean `active` are required"});
+        }
+        const updated = await User.findByIdAndUpdate(id, { active }, { new: true });
+        if (!updated) return res.status(404).json({error: true, message: "User not found"});
+        res.status(200).json({
+            error: false,
+            message: active ? "User activated" : "User deactivated",
+            data: { id: updated._id.toString(), active: updated.active },
+        });
+    }
+    catch (error){
+        console.error("[SET_USER_ACTIVE] Error: ", error.message);
         res.status(500).json({error: true, message: "Internal Server Error"});
     }
 })
