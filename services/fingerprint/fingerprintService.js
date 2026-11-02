@@ -202,7 +202,7 @@ async function handleCapture(ws) {
     }));
 
     try {
-        const result = await captureFingerprint(30000);
+        const result = await captureFingerprint(10000);
 
         if (result.success) {
             console.log('Fingerprint captured successfully', result.simulated ? '(simulated)' : '');

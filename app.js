@@ -80,7 +80,7 @@ app.use(helmet());
 
 // Restrictive CORS - configured via CORS_ORIGINS in .env
 // Default allows localhost:3000 and localhost:4000
-// For production, set: CORS_ORIGINS=http://10.1.1.181:3000,http://10.1.1.181:4000
+// For production, set: CORS_ORIGINS=http://10.1.2.132:3000,http://10.1.2.132:4000
 const defaultOrigins = ['http://localhost:3000', 'http://localhost:4000'];
 const corsOrigins = process.env.CORS_ORIGINS
   ? process.env.CORS_ORIGINS.split(',').map(o => o.trim())

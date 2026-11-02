@@ -1076,6 +1076,8 @@ router.post("/deposit", async(req, res, next) => {
 // 2. Withdraw Endpoint
 router.post("/withdraw", async(req, res, next) => {
     try {
+
+        console.log("hhhhhhhhhhhhhhhhhhhhhhh8888888888888888888888888888888888888888888")
         // Encrypted payload is REQUIRED — reject plaintext requests
         let body = req.body;
         if (!body.encrypted || typeof body.encrypted !== 'string') {

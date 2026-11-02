@@ -120,8 +120,11 @@ export function autopopulateDenomination(amount) {
  * Get customer category from Flexcube by CIF
  */
 export async function getCustomerCategory(cif) {
-    const query = `SELECT CUSTOMER_CATEGORY FROM sttm_customer WHERE CUSTOMER_NO = :1`;
+    console.log("hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh", cif)
+    const query = `SELECT CUSTOMER_CATEGORY FROM fcubsprd.sttm_customer WHERE CUSTOMER_NO = :1`;
     const result = await executeQuery(query, [cif]);
+
+    console.log("hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh777777777", result)
 
     if (!result.success || !result.data?.length) {
         return { success: false, error: 'Customer not found in Flexcube', category: null };
@@ -212,6 +215,8 @@ export async function checkWithdrawalLimit(accountNumber, withdrawAmount) {
 
     // 1. Get customer category from Flexcube
     const categoryResult = await getCustomerCategory(cif);
+
+    console.log("llllllllllllllllllllllllllllllllllllllllllllllllllllllllll", categoryResult)
     if (!categoryResult.success) {
         console.warn('Could not fetch customer category - blocking for safety');
         return {
@@ -374,7 +379,7 @@ export async function checkMakerCheckerThreshold(amount, currency = 'ETB') {
  */
 export function buildCreateTransactionSOAP(params) {
     const {
-        product = 'ETAL',         // Product code (CSWL for withdrawal, CSDP for deposit, ETAL for transfer)
+        product = 'SMRT',         // Product code (CSWL for withdrawal, CSDP for deposit, ETAL for transfer)
         branch,                    // Transaction branch
         txnBranch,                // Teller branch
         txnAccount,               // Transaction account (customer account)
@@ -384,7 +389,7 @@ export function buildCreateTransactionSOAP(params) {
         offsetAccount,            // Offset account (GL account or other customer account)
         offsetCurrency = 'ETB',
         offsetAmount,
-        userId = 'EXT_IBM',       // Flexcube user ID - use EXT_IBM for external integration
+        userId = 'SMARTB',       // Flexcube user ID - use SMART for external integration
         source = 'EXTIB',         // Source system - use EXTIB for external integration
         xref = '',                // External reference (16-digit)
         narrative = ''            // Transaction narrative/description
@@ -434,7 +439,7 @@ export function buildCreateTransactionSOAP(params) {
                     <fcub:XREF>${flexcubeXref}</fcub:XREF>
                     <fcub:PRD>${product}</fcub:PRD>
                     <fcub:BRN>${branch}</fcub:BRN>
-                    <fcub:TXNBRN>${branch}</fcub:TXNBRN>
+                    <fcub:TXNBRN>${txnBranch}</fcub:TXNBRN>
                     <fcub:TXNACC>${txnAccount}</fcub:TXNACC>
                     <fcub:TXNCCY>${txnCurrency}</fcub:TXNCCY>
                     <fcub:TXNAMT>${parseFloat(txnAmount).toFixed(2)}</fcub:TXNAMT>
@@ -655,8 +660,8 @@ export async function createDepositTransaction(params) {
     });
 
     const soapParams = {
-        product: 'SMBR',              // Cash Deposit product
-        branch: customerBranch,
+        product: 'SMCA',              // Cash Deposit product
+        branch: tellerBranch,
         txnBranch: tellerBranch || customerBranch,
         txnAccount: glAccount,        // Debit GL account (cash in)
         txnCurrency: 'ETB',
@@ -665,7 +670,7 @@ export async function createDepositTransaction(params) {
         offsetAccount: customerAccount, // Credit customer account
         offsetCurrency: 'ETB',
         offsetAmount: amount,
-        userId: 'IB_SER',            // External integration user
+        userId: 'SMARTB',            // External integration user
         source: 'EXTIB',              // External integration source
         xref: xref,
         narrative: narrative || `DEPOSIT-${customerAccount}`
@@ -711,9 +716,9 @@ export async function createWithdrawTransaction(params) {
     });
 
     const soapParams = {
-        product: 'SMBR',              // Cash Withdrawal product
-        branch: customerBranch,
-        txnBranch: tellerBranch || customerBranch,
+        product: 'SMCA',              // Cash Withdrawal product
+        branch: tellerBranch,
+        txnBranch: customerBranch,
         txnAccount: customerAccount,  // Debit customer account
         txnCurrency: 'ETB',
         txnAmount: amount,
@@ -721,7 +726,7 @@ export async function createWithdrawTransaction(params) {
         offsetAccount: glAccount,     // Credit GL account (teller's till)
         offsetCurrency: 'ETB',
         offsetAmount: amount,
-        userId: 'IB_SER',            // External integration user
+        userId: 'SMARTB',            // External integration user
         source: 'EXTIB',              // External integration source
         xref: xref,
         narrative: narrative || `WITHDRAW-${customerAccount}`
@@ -771,9 +776,9 @@ export async function createTransferTransaction(params) {
     });
 
     const soapParams = {
-        product: 'SMBR',              // Electronic Transfer product
-        branch: fromBranch,
-        txnBranch: tellerBranch || fromBranch,
+        product: 'SMRT',              // Electronic Transfer product
+        branch: tellerBranch,
+        txnBranch: fromBranch || fromBranch,
         txnAccount: fromAccount,      // Debit source account
         txnCurrency: 'ETB',
         txnAmount: amount,
@@ -781,7 +786,7 @@ export async function createTransferTransaction(params) {
         offsetAccount: toAccount,     // Credit destination account
         offsetCurrency: 'ETB',
         offsetAmount: amount,
-        userId: 'IB_SER',            // External integration user
+        userId: 'SMARTB',            // External integration user
         source: 'EXTIB',              // External integration source
         xref: xref,
         narrative: narrative || `TRANSFER-${fromAccount}-TO-${toAccount}`
@@ -847,10 +852,9 @@ export async function updateTillForDeposit(tillId, branchCode, denomination) {
                 tillId,
                 branchCode,
                 rowCount: diagnosticResult.data.length,
-                sampleData: diagnosticResult.data.slice(0, 3) // Show first 3 rows
+                sampleData: diagnosticResult.data.slice(0, 3)
             });
 
-            // Log the actual DENOMVAL values in the table
             const denomVals = diagnosticResult.data.map(row => ({
                 DENOMVAL: row.DENOMVAL,
                 DENOMVAL_TYPE: typeof row.DENOMVAL,
@@ -864,7 +868,6 @@ export async function updateTillForDeposit(tillId, branchCode, denomination) {
                 error: diagnosticResult.error
             });
 
-            // Try to find what tills exist for this branch
             const branchTillsQuery = `
                 SELECT DISTINCT TILL_ID, BRANCHCODE
                 FROM FCUBSPRD.FBTB_TILL_DETAIL_CCY
@@ -894,12 +897,15 @@ export async function updateTillForDeposit(tillId, branchCode, denomination) {
         { field: 'dc1', value: 0.01 },
     ];
 
+    let totalDepositAmount = 0; // Will hold sum of count * value for all denominations
+
     for (const { field, value } of denomMap) {
         const count = denomination[field] || 0;
         if (count > 0) {
-            debugLog('TILL_DEPOSIT_DENOM', `Adding denomination update: ${field} = ${count} x ${value}`, { field, count, value });
+            const amount = count * value;
+            totalDepositAmount += amount;
+            debugLog('TILL_DEPOSIT_DENOM', `Adding denomination update: ${field} = ${count} x ${value} (amount: ${amount})`, { field, count, value, amount });
             // Update INFLOW for the specific denomination
-            // DENOMCOUNT is calculated automatically: OPENINGBALANCE + INFLOW - OUTFLOW
             updates.push({
                 query: `UPDATE FCUBSPRD.FBTB_TILL_DETAIL_CCY
                         SET INFLOW = INFLOW + :1,
@@ -914,10 +920,25 @@ export async function updateTillForDeposit(tillId, branchCode, denomination) {
         }
     }
 
+    // --- ADDED: Update totals table for the entire deposit ---
+    if (totalDepositAmount > 0) {
+        debugLog('TILL_DEPOSIT_TOTALS', 'Adding totals update', { tillId, totalDepositAmount });
+        updates.push({
+            query: `UPDATE FCUBSPRD.fbtb_till_totals
+                    SET inflow = inflow + :1
+                    WHERE till_id = :2
+                      AND ccycode = 'ETB'
+                      AND branchcode = :3
+                      AND POSTINGDATE = TO_DATE(CURRENT_DATE)`,
+            params: [totalDepositAmount, tillId, branchCode],
+            description: `Deposit total inflow update: ${totalDepositAmount} ETB`
+        });
+    }
+    // --- END ADDED ---
+
     debugLog('TILL_DEPOSIT_QUERIES', `Total queries to execute: ${updates.length}`);
 
     try {
-        // Execute all updates
         let successCount = 0;
         let failCount = 0;
         let totalRowsAffected = 0;
@@ -935,7 +956,7 @@ export async function updateTillForDeposit(tillId, branchCode, denomination) {
                 debugLog('TILL_DEPOSIT_RESULT', `Query ${i + 1} SUCCESS`, { rowsAffected });
 
                 if (rowsAffected === 0) {
-                    debugLog('TILL_DEPOSIT_WARNING', `Query ${i + 1} affected 0 rows - denomination may not exist in till`, { params });
+                    debugLog('TILL_DEPOSIT_WARNING', `Query ${i + 1} affected 0 rows`, { params });
                 }
             } else {
                 failCount++;
@@ -1047,12 +1068,15 @@ export async function updateTillForWithdraw(tillId, branchCode, denomination) {
         { field: 'dc1', value: 0.01 },
     ];
 
+    let totalWithdrawAmount = 0; // Will hold sum of count * value for all denominations
+
     for (const { field, value } of denomMap) {
         const count = denomination[field] || 0;
         if (count > 0) {
-            debugLog('TILL_WITHDRAW_DENOM', `Adding denomination update: ${field} = ${count} x ${value}`, { field, count, value });
+            const amount = count * value;
+            totalWithdrawAmount += amount;
+            debugLog('TILL_WITHDRAW_DENOM', `Adding denomination update: ${field} = ${count} x ${value} (amount: ${amount})`, { field, count, value, amount });
             // Update OUTFLOW and DENOMCOUNT for the specific denomination
-            // DENOMCOUNT = OPENINGBALANCE + INFLOW - OUTFLOW
             updates.push({
                 query: `UPDATE FCUBSPRD.FBTB_TILL_DETAIL_CCY
                         SET OUTFLOW = OUTFLOW + :1,
@@ -1067,10 +1091,25 @@ export async function updateTillForWithdraw(tillId, branchCode, denomination) {
         }
     }
 
+    // --- ADDED: Update totals table to subtract the withdrawal amount ---
+    if (totalWithdrawAmount > 0) {
+        debugLog('TILL_WITHDRAW_TOTALS', 'Adding totals update (subtract)', { tillId, totalWithdrawAmount });
+        updates.push({
+            query: `UPDATE FCUBSPRD.fbtb_till_totals
+                    SET outflow = outflow + :1
+                    WHERE till_id = :2
+                      AND ccycode = 'ETB'
+                      AND branchcode = :3
+                      AND POSTINGDATE = TO_DATE(CURRENT_DATE)`,
+            params: [totalWithdrawAmount, tillId, branchCode],
+            description: `Withdraw total outflow reduction: ${totalWithdrawAmount} ETB`
+        });
+    }
+    // --- END ADDED ---
+
     debugLog('TILL_WITHDRAW_QUERIES', `Total queries to execute: ${updates.length}`);
 
     try {
-        // Execute all updates
         let successCount = 0;
         let failCount = 0;
         let totalRowsAffected = 0;
@@ -1088,7 +1127,7 @@ export async function updateTillForWithdraw(tillId, branchCode, denomination) {
                 debugLog('TILL_WITHDRAW_RESULT', `Query ${i + 1} SUCCESS`, { rowsAffected });
 
                 if (rowsAffected === 0) {
-                    debugLog('TILL_WITHDRAW_WARNING', `Query ${i + 1} affected 0 rows - denomination may not exist in till`, { params });
+                    debugLog('TILL_WITHDRAW_WARNING', `Query ${i + 1} affected 0 rows`, { params });
                 }
             } else {
                 failCount++;
@@ -1112,7 +1151,6 @@ export async function updateTillForWithdraw(tillId, branchCode, denomination) {
         return { success: false, error: error.message };
     }
 }
-
 // ============================================
 // TILL QUERY FUNCTIONS
 // ============================================

@@ -10,7 +10,7 @@
 //
 // Run (hit the BACKEND directly, not the Vite proxy):
 //   k6 run \
-//     -e BASE_URL=http://10.1.1.181:5000 \
+//     -e BASE_URL=http://10.1.2.132:5000 \
 //     -e TOKEN=<a valid Teller or Admin x-access-token> \
 //     -e QUERIES=1000123,1000456,1000789 \
 //     loadtest/transactions_search.k6.js
