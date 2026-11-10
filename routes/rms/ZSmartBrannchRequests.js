@@ -21,6 +21,7 @@ import os from 'os';
 import { fileURLToPath } from 'url';
 import * as FlexcubeTransactionService from '../../services/FlexcubeTransactionService.js';
 import { withPostingLock } from '../../utils/rms/postingLock.js';
+import { computeBranchStats, STATS_PROJECTION } from '../../utils/rms/branchStats.js';
 import CustomerCategoryLimit from '../../models/rms/CustomerCategoryLimit.js';
 import MakerCheckerThreshold from '../../models/rms/MakerCheckerThreshold.js';
 import crypto from 'crypto';
@@ -3919,7 +3920,7 @@ router.get("/branch_transactions", auth, async(req, res, next) => {
         const { from: fromDate, to: toDate } = req.query;
         if (fromDate || toDate) {
             queryCondition.request_date = {};
-            if (fromDate) queryCondition.request_date.$gte = new Date(fromDate);
+            if (fromDate) queryCondition.request_date.$gte = new Date(`${fromDate}T00:00:00`);
             if (toDate) queryCondition.request_date.$lte = new Date(`${toDate}T23:59:59`);
         }
 
@@ -4102,136 +4103,9 @@ router.get("/branch_transactions", auth, async(req, res, next) => {
 
 
 
-// ---------------------------------------------------------------------------
-// Server-side aggregates for the Branch Record dashboard charts.
-// This is a FAITHFUL port of the client-side computation that previously ran in
-// src/views/admin/Branch_Record/stat.js (StatisticsTab) and BranchStat.js, so
-// the charts render byte-identically — but it runs over light, projected docs
-// on the server and returns only the small aggregates object, instead of
-// shipping the entire transactions array (with base64 images) to the browser.
-const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-const computeBranchStats = (transactions, branchCode) => {
-    let incomingMoney = 0;
-    let outgoingMoney = 0;
-    let totalAmount = 0;
-    let maxAmount = 0;
-    let minAmount = Infinity;
-    const transactionTypes = {};
-    const statusDistribution = {};
-    const postedByDistribution = {};
-    const userStats = {};
-    const delayMetrics = {};
-    const waitingTimes = [];
-    const hourSlots = {};
-    const dayCounts = {};
-
-    transactions.forEach((tx) => {
-        const amount = parseFloat(tx.amount_in_figures) || 0;
-        const type = tx.transactionType ? tx.transactionType.toLowerCase() : undefined;
-        const status = tx.status || 'unknown';
-        const postedBy = tx.posted_by || 'Unassigned';
-        const beneficiaryBranch = tx.beneficiary_branch || '';
-
-        transactionTypes[type] = (transactionTypes[type] || 0) + 1;
-        statusDistribution[status] = (statusDistribution[status] || 0) + 1;
-        postedByDistribution[postedBy] = (postedByDistribution[postedBy] || 0) + 1;
-
-        // Money classification (identical type-string checks as the client).
-        if (type === 'deposit') {
-            incomingMoney += amount;
-        } else if (type === 'withdraw' || type === 'other-bank-transfer') {
-            outgoingMoney += amount;
-        } else if (type === 'transfer') {
-            if (beneficiaryBranch === branchCode) incomingMoney += amount;
-            else outgoingMoney += amount;
-        }
-
-        // Amount stats (BranchStat).
-        totalAmount += amount;
-        if (amount > maxAmount) maxAmount = amount;
-        if (amount < minAmount) minAmount = amount;
-
-        // Per-user stats.
-        if (!userStats[postedBy]) userStats[postedBy] = { incomingMoney: 0, outgoingMoney: 0, count: 0 };
-        userStats[postedBy].count += 1;
-        if (type === 'deposit' || (type === 'transfer' && beneficiaryBranch === branchCode)) {
-            userStats[postedBy].incomingMoney += amount;
-        } else if (type === 'withdraw' || type === 'other-bank-transfer' || (type === 'transfer' && beneficiaryBranch !== branchCode)) {
-            userStats[postedBy].outgoingMoney += amount;
-        }
-
-        // Posting delay per user (posted_date - assigned_date), minutes.
-        if (tx.assigned_date && tx.posted_date) {
-            const delayMin = (new Date(tx.posted_date) - new Date(tx.assigned_date)) / 60000;
-            if (!isNaN(delayMin) && delayMin >= 0) {
-                if (!delayMetrics[postedBy]) {
-                    delayMetrics[postedBy] = { max: delayMin, min: delayMin, total: delayMin, count: 1 };
-                } else {
-                    delayMetrics[postedBy].max = Math.max(delayMetrics[postedBy].max, delayMin);
-                    delayMetrics[postedBy].min = Math.min(delayMetrics[postedBy].min, delayMin);
-                    delayMetrics[postedBy].total += delayMin;
-                    delayMetrics[postedBy].count += 1;
-                }
-            }
-        }
-
-        // Waiting time (request_date -> assigned_date), rounded minutes (BranchStat).
-        if (tx.request_date && tx.assigned_date) {
-            const diffMin = Math.round((new Date(tx.assigned_date) - new Date(tx.request_date)) / 60000);
-            if (!isNaN(diffMin) && diffMin >= 0) waitingTimes.push(diffMin);
-        }
-
-        // Busy hours (2-hour windows) + busy days (BranchStat).
-        if (tx.request_date) {
-            const d = new Date(tx.request_date);
-            const hour = d.getHours();
-            const slotStart = Math.floor(hour / 2) * 2;
-            const slotEnd = slotStart + 2;
-            const label = `${String(slotStart).padStart(2, '0')}:00 - ${String(slotEnd).padStart(2, '0')}:00`;
-            hourSlots[label] = (hourSlots[label] || 0) + 1;
-            const day = WEEKDAYS[d.getDay()];
-            if (day) dayCounts[day] = (dayCounts[day] || 0) + 1;
-        }
-    });
-
-    // Per-user average delay (return only what the charts read: min/avg/max).
-    const delayMetricsOut = {};
-    Object.entries(delayMetrics).forEach(([user, m]) => {
-        delayMetricsOut[user] = { min: m.min, max: m.max, avg: m.total / m.count };
-    });
-
-    const totalTransactions = transactions.length;
-    if (minAmount === Infinity) minAmount = 0;
-
-    // Waiting-time summary (BranchStat waitStats: avg is toFixed(1) string in the client).
-    let waitStats = { min: 0, max: 0, avg: 0 };
-    if (waitingTimes.length > 0) {
-        waitStats = {
-            min: waitingTimes.reduce((m, v) => (v < m ? v : m), Infinity),
-            max: waitingTimes.reduce((m, v) => (v > m ? v : m), -Infinity),
-            avg: (waitingTimes.reduce((a, b) => a + b, 0) / waitingTimes.length).toFixed(1),
-        };
-    }
-
-    return {
-        // StatisticsTab
-        incomingMoney, outgoingMoney, netFlow: incomingMoney - outgoingMoney,
-        transactionTypes, statusDistribution, postedByDistribution,
-        userStats, delayMetrics: delayMetricsOut, totalTransactions,
-        // BranchStat
-        totalAmount, maxAmount, minAmount,
-        avgAmount: totalTransactions > 0 ? totalAmount / totalTransactions : 0,
-        incomingAmount: incomingMoney, outgoingAmount: outgoingMoney,
-        typeCounts: transactionTypes, statusCounts: statusDistribution,
-        hourSlots, dayCounts, waitStats,
-    };
-};
-
-// Lightweight fields needed for the aggregates (NO base64 images / heavy fields).
-const STATS_PROJECTION = {
-    amount_in_figures: 1, status: 1, posted_by: 1, beneficiary_branch: 1,
-    assigned_date: 1, posted_date: 1, request_date: 1,
-};
+// The Branch Record dashboard figures are worked out on the server, over light projected
+// documents, and only the small result object is sent to the browser.
+// What each figure means is documented in utils/rms/branchStats.js.
 
 router.get("/branch_transactions_stats", auth, async (req, res, next) => {
     try {
@@ -4256,7 +4130,7 @@ router.get("/branch_transactions_stats", auth, async (req, res, next) => {
         const filter = { ...queryCondition };
         if (from || to) {
             filter.request_date = {};
-            if (from) filter.request_date.$gte = new Date(from);
+            if (from) filter.request_date.$gte = new Date(`${from}T00:00:00`);
             if (to) filter.request_date.$lte = new Date(`${to}T23:59:59`);
         }
 
