@@ -181,6 +181,11 @@ const other_bank_transferSchema =  new Schema({
     other_bank_transferSchema.index({ branch: 1, status: 1, request_date: -1 });
     other_bank_transferSchema.index({ assigned_to: 1, request_date: -1 });
     other_bank_transferSchema.index({ status: 1, posted_date: -1 });
+    // Teller auto-assignment counts today's tickets per teller in a branch (assignTellerBySystem).
+    other_bank_transferSchema.index({ branch: 1, assigned_date: 1, assigned_to: 1 });
+    // Date-range views: all branches (Branch_Management, admin search) and one branch's history.
+    other_bank_transferSchema.index({ request_date: -1 });
+    other_bank_transferSchema.index({ branch: 1, request_date: -1 });
     // Teller/Admin search-by-customer/account within today's window (/transactions).
     other_bank_transferSchema.index({ Customer_Unique_Number: 1, request_date: -1 });
     other_bank_transferSchema.index({ account_number: 1, request_date: -1 });

@@ -9,8 +9,9 @@ import refreshTokenRoutes from "./routes/rms/refreshToken.js";
 import userRoutes from "./routes/rms/users.js";
 import { fileURLToPath } from 'url';
 import { HfInference } from "@huggingface/inference";
-import { dirname } from 'path';
+import { dirname, join } from 'path';
 import ollama from 'ollama'
+import mongoose from "mongoose";
 
 import rmsAdminPlace from "./routes/rms/Admin/Place.js";
 import rmsAdminSite from "./routes/rms/Admin/Site.js";
@@ -75,8 +76,27 @@ import { generalLimiter } from "./middleware/rms/rateLimiter.js"
 
 const app = express();
 
+// The backoffice reaches this API through its nginx proxy. Trust X-Forwarded-For only when the
+// connection comes from that proxy's network (TRUST_PROXY = comma-separated addresses/subnets,
+// e.g. the Docker subnet), so req.ip, and with it the per-IP rate limit, is the real staff PC
+// instead of one shared proxy address. Unset (the default) = trust no proxy, as before.
+if (process.env.TRUST_PROXY) {
+  app.set("trust proxy", process.env.TRUST_PROXY.split(",").map((s) => s.trim()).filter(Boolean));
+}
+
 // Security headers
 app.use(helmet());
+
+// Liveness probe for the Docker healthcheck. Registered before CORS and the rate
+// limiter so health checks never use up a client's request budget. Always 200 while
+// the process can answer; `mongo` reports the MongoDB connection state for operators.
+app.get("/healthz", (req, res) => {
+  res.set("Cache-Control", "no-store");
+  res.status(200).json({
+    status: "ok",
+    mongo: mongoose.connection.readyState === 1 ? "connected" : "disconnected",
+  });
+});
 
 // Restrictive CORS - configured via CORS_ORIGINS in .env
 // Default allows localhost:3000 and localhost:4000
@@ -99,22 +119,20 @@ app.use(generalLimiter);
 
 app.use(express.urlencoded({ extended: true }));
 
-app.use(express.json({
-  verify: (req, res, buf) => {
-    if (buf && buf.length) {
-      try {
-        JSON.parse(buf);
-      } catch (error) {
-        res.status(400).json({ message: 'Invalid JSON format' });
-      }
-    }
-  },
-}));
+// Malformed JSON is answered with 400 "Invalid JSON format" by the error handler at the bottom
+// (body-parser's `entity.parse.failed`). The `verify` hook that used to do this parsed every
+// request body a second time and, on bad JSON, answered twice.
+app.use(express.json());
 
 const currentFilePath = fileURLToPath(import.meta.url);
 const currentDirectory = dirname(currentFilePath);
-const publicDirectory = `${currentDirectory}\\uploads`;
-app.use(express.static(publicDirectory));
+// path.join, not a hard-coded "\\": the backslash only works on Windows and on Linux
+// pointed express.static at a non-existent "app.js-dir\uploads" entry.
+const publicDirectory = join(currentDirectory, 'uploads');
+// Uploaded files are served from the site root. API requests skip this: otherwise every
+// GET /api/... first cost a disk lookup for a file that can never exist under uploads/.
+const uploadsStatic = express.static(publicDirectory);
+app.use((req, res, next) => (req.path.startsWith('/api/') ? next() : uploadsStatic(req, res, next)));
 
 
 
@@ -214,6 +232,10 @@ app.use("/api/rms/admin/landing",
 
 // Centralized error handling middleware - must be after all routes
 app.use((err, req, res, next) => {
+    // Request body was not valid JSON — same answer the old `verify` hook gave.
+    if (err.type === 'entity.parse.failed') {
+        return res.status(400).json({ message: 'Invalid JSON format' });
+    }
     console.error(`[ERROR] ${req.method} ${req.path}:`, err.message);
     res.status(err.status || 500).json({
         error: true,

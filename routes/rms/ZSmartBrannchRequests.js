@@ -20,6 +20,7 @@ import path from 'path';
 import os from 'os';
 import { fileURLToPath } from 'url';
 import * as FlexcubeTransactionService from '../../services/FlexcubeTransactionService.js';
+import { withPostingLock } from '../../utils/rms/postingLock.js';
 import CustomerCategoryLimit from '../../models/rms/CustomerCategoryLimit.js';
 import MakerCheckerThreshold from '../../models/rms/MakerCheckerThreshold.js';
 import crypto from 'crypto';
@@ -629,6 +630,29 @@ const router = Router();
 
 
 
+// Lock name for the checker's approval: the same name the maker's posting route uses for that
+// kind of transaction, so a posting and an approval of one transaction cannot overlap.
+const checkerLockKind = (req) => {
+    const type = req.body?.transaction_type;
+    return type === 'E-Check' ? 'ECheck' : type;
+};
+
+// Sends an SMS without making the caller wait for the gateway. The customer's request used to
+// block on this call, which had no timeout of its own (Node waits up to 5 minutes), so one slow
+// gateway held every kiosk submission open. None of the responses depend on the SMS result:
+// failures were, and still are, only logged.
+function sendSmsInBackground(smsUrl, failedMessage, errorMessage) {
+    // Sent in the background, so the limit can be generous: it only stops a dead gateway from
+    // piling up open connections.
+    fetch(smsUrl, { signal: AbortSignal.timeout(30000) })
+        .then((response) => {
+            if (!response.ok) console.error(failedMessage);
+            // Release the connection: the body is never read.
+            return response.body?.cancel();
+        })
+        .catch((smsError) => console.error(errorMessage, smsError.message));
+}
+
 router.post("/transaction_reassigned", auth, roleCheck(["Admin", "Authorizer"]), async (req, res, next) => {
     try {
         const user = await User.findById(req.user._id).lean();
@@ -806,52 +830,11 @@ router.get("/get_assigned_transaction_per_brnach", auth, roleCheck(["Admin", "Au
             }))
         ];
 
-        // Get unique account numbers
-        const accountNumbers = [...new Set(transformedTransactions.map(t => t.account_number))];
-
-        // Fetch images from Oracle DB
-        const imagesQuery = `
-            SELECT 
-                CA.CUST_AC_NO,
-                CI.IMAGE_TEXT AS PROFILE_IMAGE,
-                SI.SIG_TEXT AS SIGN_IMAGE
-            FROM fcubsprd.STTM_CUST_ACCOUNT CA
-            LEFT JOIN fcubsprd.STTM_CUST_IMAGE CI ON CA.CUST_NO = CI.CUSTOMER_NO
-            LEFT JOIN fcubsprd.svtm_cif_sig_det SI ON CA.CUST_NO = SI.CIF_ID
-            WHERE CA.CUST_AC_NO IN (${accountNumbers.map((_, i) => `:${i + 1}`).join(',')})
-        `;
-
-        const imagesResult = await executeQuery(
-            imagesQuery,
-            accountNumbers,
-            {
-                fetchInfo: {
-                    PROFILE_IMAGE: { type: oracledb.STRING },
-                    SIGN_IMAGE: { type: oracledb.STRING }
-                }
-            }
-        );
-
-        // Create a map of account numbers to their images
-        const accountImages = {};
-        if (imagesResult.success && imagesResult.data) {
-            imagesResult.data.forEach(row => {
-                accountImages[row.CUST_AC_NO] = {
-                    profile_image: row.PROFILE_IMAGE ? 
-                        `data:image/jpeg;base64,${row.PROFILE_IMAGE}` : null,
-                    sign_image: row.SIGN_IMAGE ? 
-                        `data:image/jpeg;base64,${row.SIGN_IMAGE}` : null
-                };
-            });
-        }
-
-        // Add images to transactions and sort by request_date
+        // Customer photo / signature are NOT loaded here any more. This list is refetched all
+        // day by every open tab, and it pulled both images from FlexCube for every account on
+        // every refresh. The screen now asks /account_images/:account_number when a row is
+        // opened (same as get_assigned_to_me).
         const finalTransactions = transformedTransactions
-            .map(transaction => ({
-                ...transaction,
-                profile_image: accountImages[transaction.account_number]?.profile_image || null,
-                sign_image: accountImages[transaction.account_number]?.sign_image || null
-            }))
             .sort((a, b) => new Date(b.request_date) - new Date(a.request_date));
 
         // Calculate summary
@@ -1038,17 +1021,7 @@ router.post("/deposit", async(req, res, next) => {
             // Construct SMS API URL
             const smsUrl = `https://smsgateway.zemenbank.com/http-api/send?username=smartbranch&password=Y8z6pTB80l6%234siD&to=${phoneNumber}&from=8011&coding=8&content=${encodedContent}`;
 
-            try {
-                // Send SMS using fetch or axios
-                const response = await fetch(smsUrl);
-                
-                if (!response.ok) {
-                    console.error("[SMS] Sending failed");
-                }
-            } catch (smsError) {
-                console.error("[SMS] Sending error:", smsError.message);
-                // Don't return error to client, just log it
-            }
+            sendSmsInBackground(smsUrl, "[SMS] Sending failed", "[SMS] Sending error:");
         }
 
 
@@ -1244,17 +1217,7 @@ router.post("/withdraw", async(req, res, next) => {
             // Construct SMS API URL
             const smsUrl = `https://smsgateway.zemenbank.com/http-api/send?username=smartbranch&password=Y8z6pTB80l6%234siD&to=${phoneNumber}&from=8011&coding=8&content=${encodedContent}`;
 
-            try {
-                // Send SMS using fetch or axios
-                const response = await fetch(smsUrl);
-                
-                if (!response.ok) {
-                    console.error("[SMS] Sending failed");
-                }
-            } catch (smsError) {
-                console.error("[SMS] Sending error:", smsError.message);
-                // Don't return error to client, just log it
-            }
+            sendSmsInBackground(smsUrl, "[SMS] Sending failed", "[SMS] Sending error:");
         }
 
 
@@ -1455,17 +1418,7 @@ router.post("/echeck", async(req, res, next) => {
             // Construct SMS API URL
             const smsUrl = `https://smsgateway.zemenbank.com/http-api/send?username=smartbranch&password=Y8z6pTB80l6%234siD&to=${phoneNumber}&from=8011&coding=8&content=${encodedContent}`;
 
-            try {
-                // Send SMS using fetch or axios
-                const response = await fetch(smsUrl);
-
-                if (!response.ok) {
-                    console.error("[SMS] Sending failed");
-                }
-            } catch (smsError) {
-                console.error("[SMS] Sending error:", smsError.message);
-                // Don't return error to client, just log it
-            }
+            sendSmsInBackground(smsUrl, "[SMS] Sending failed", "[SMS] Sending error:");
         }
 
         res.status(201).json({
@@ -1661,17 +1614,7 @@ router.post("/transfer", async(req, res, next) => {
             // Construct SMS API URL
             const smsUrl = `https://smsgateway.zemenbank.com/http-api/send?username=smartbranch&password=Y8z6pTB80l6%234siD&to=${phoneNumber}&from=8011&coding=8&content=${encodedContent}`;
 
-            try {
-                // Send SMS using fetch or axios
-                const response = await fetch(smsUrl);
-                
-                if (!response.ok) {
-                    console.error("[SMS] Sending failed");
-                }
-            } catch (smsError) {
-                console.error("[SMS] Sending error:", smsError.message);
-                // Don't return error to client, just log it
-            }
+            sendSmsInBackground(smsUrl, "[SMS] Sending failed", "[SMS] Sending error:");
         }
 
 
@@ -1864,17 +1807,7 @@ router.post("/other_bank_transfer", async(req, res, next) => {
             // Construct SMS API URL
             const smsUrl = `https://smsgateway.zemenbank.com/http-api/send?username=smartbranch&password=Y8z6pTB80l6%234siD&to=${phoneNumber}&from=8011&coding=8&content=${encodedContent}`;
 
-            try {
-                // Send SMS using fetch or axios
-                const response = await fetch(smsUrl);
-                
-                if (!response.ok) {
-                    console.error("[SMS] Sending failed");
-                }
-            } catch (smsError) {
-                console.error("[SMS] Sending error:", smsError.message);
-                // Don't return error to client, just log it
-            }
+            sendSmsInBackground(smsUrl, "[SMS] Sending failed", "[SMS] Sending error:");
         }
         
 
@@ -1999,7 +1932,9 @@ router.get("/transactions", auth, roleCheck(["Teller", "Authorizer", "Maker", "A
 // On-demand customer images for a single account. Called only when a teller
 // OPENS a search result's details — NOT on every search — so the expensive
 // Flexcube/Oracle image lookup stays off the high-TPS search path.
-router.get("/account_images/:account_number", auth, roleCheck(["Teller", "Authorizer", "Maker", "Admin"]), async (req, res) => {
+// Auditor added: the Audit list used to carry these images inline; it now loads them here when a
+// row is opened, so auditors keep seeing exactly what they saw before.
+router.get("/account_images/:account_number", auth, roleCheck(["Teller", "Authorizer", "Maker", "Admin", "Auditor"]), async (req, res) => {
     try {
         const { account_number } = req.params;
         if (!account_number) {
@@ -3176,58 +3111,11 @@ router.get("/get_posted_data", auth, roleCheck(["Authorizer","Teller"]), async(r
             }))
         ];
 
-        // Get unique account numbers
-        const accountNumbers = [...new Set(transformedTransactions.map(t => t.account_number))];
-
-        // Only proceed with Oracle query if there are transactions
-        let finalTransactions = transformedTransactions;
-        
-        if (accountNumbers.length > 0) {
-            // Fetch images from Oracle DB
-            const imagesQuery = `
-                SELECT 
-                    CA.CUST_AC_NO,
-                    CI.IMAGE_TEXT AS PROFILE_IMAGE,
-                    SI.SIG_TEXT AS SIGN_IMAGE
-                FROM fcubsprd.STTM_CUST_ACCOUNT CA
-                LEFT JOIN fcubsprd.STTM_CUST_IMAGE CI ON CA.CUST_NO = CI.CUSTOMER_NO
-                LEFT JOIN fcubsprd.svtm_cif_sig_det SI ON CA.CUST_NO = SI.CIF_ID
-                WHERE CA.CUST_AC_NO IN (${accountNumbers.map((_, i) => `:${i + 1}`).join(',')})
-            `;
-
-            const imagesResult = await executeQuery(
-                imagesQuery,
-                accountNumbers,
-                {
-                    fetchInfo: {
-                        PROFILE_IMAGE: { type: oracledb.STRING },
-                        SIGN_IMAGE: { type: oracledb.STRING }
-                    }
-                }
-            );
-
-            // Create a map of account numbers to their images
-            const accountImages = {};
-            if (imagesResult.success && imagesResult.data) {
-                imagesResult.data.forEach(row => {
-                    accountImages[row.CUST_AC_NO] = {
-                        profile_image: row.PROFILE_IMAGE ? 
-                            `data:image/jpeg;base64,${row.PROFILE_IMAGE}` : null,
-                        sign_image: row.SIGN_IMAGE ? 
-                            `data:image/jpeg;base64,${row.SIGN_IMAGE}` : null
-                    };
-                });
-            }
-
-            // Add images to transactions and sort by request_date
-            finalTransactions = transformedTransactions
-                .map(transaction => ({
-                    ...transaction,
-                    profile_image: accountImages[transaction.account_number]?.profile_image || null,
-                    sign_image: accountImages[transaction.account_number]?.sign_image || null
-                }))
-                .sort((a, b) => new Date(b.request_date) - new Date(a.request_date));
-        }
+        // Customer photo / signature are no longer joined in from FlexCube here: they were
+        // fetched for every account on every refresh of this list. Screens ask
+        // /account_images/:account_number when a row is opened (as get_assigned_to_me does).
+        let finalTransactions = transformedTransactions
+            .sort((a, b) => new Date(b.request_date) - new Date(a.request_date));
 
         // Calculate summary
         const summary = {
@@ -3347,58 +3235,11 @@ router.get("/get_authorized_data", auth, roleCheck(["Auditor","Teller"]), async(
             }))
         ];
 
-        // Get unique account numbers
-        const accountNumbers = [...new Set(transformedTransactions.map(t => t.account_number))];
-
-        // Only proceed with Oracle query if there are transactions
-        let finalTransactions = transformedTransactions;
-        
-        if (accountNumbers.length > 0) {
-            // Fetch images from Oracle DB
-            const imagesQuery = `
-                SELECT 
-                    CA.CUST_AC_NO,
-                    CI.IMAGE_TEXT AS PROFILE_IMAGE,
-                    SI.SIG_TEXT AS SIGN_IMAGE
-                FROM fcubsprd.STTM_CUST_ACCOUNT CA
-                LEFT JOIN fcubsprd.STTM_CUST_IMAGE CI ON CA.CUST_NO = CI.CUSTOMER_NO
-                LEFT JOIN fcubsprd.svtm_cif_sig_det SI ON CA.CUST_NO = SI.CIF_ID
-                WHERE CA.CUST_AC_NO IN (${accountNumbers.map((_, i) => `:${i + 1}`).join(',')})
-            `;
-
-            const imagesResult = await executeQuery(
-                imagesQuery,
-                accountNumbers,
-                {
-                    fetchInfo: {
-                        PROFILE_IMAGE: { type: oracledb.STRING },
-                        SIGN_IMAGE: { type: oracledb.STRING }
-                    }
-                }
-            );
-
-            // Create a map of account numbers to their images
-            const accountImages = {};
-            if (imagesResult.success && imagesResult.data) {
-                imagesResult.data.forEach(row => {
-                    accountImages[row.CUST_AC_NO] = {
-                        profile_image: row.PROFILE_IMAGE ? 
-                            `data:image/jpeg;base64,${row.PROFILE_IMAGE}` : null,
-                        sign_image: row.SIGN_IMAGE ? 
-                            `data:image/jpeg;base64,${row.SIGN_IMAGE}` : null
-                    };
-                });
-            }
-
-            // Add images to transactions and sort by request_date
-            finalTransactions = transformedTransactions
-                .map(transaction => ({
-                    ...transaction,
-                    profile_image: accountImages[transaction.account_number]?.profile_image || null,
-                    sign_image: accountImages[transaction.account_number]?.sign_image || null
-                }))
-                .sort((a, b) => new Date(b.request_date) - new Date(a.request_date));
-        }
+        // Customer photo / signature are no longer joined in from FlexCube here: they were
+        // fetched for every account on every refresh of this list. Screens ask
+        // /account_images/:account_number when a row is opened (as get_assigned_to_me does).
+        let finalTransactions = transformedTransactions
+            .sort((a, b) => new Date(b.request_date) - new Date(a.request_date));
 
         // Calculate summary
         const summary = {
@@ -4204,57 +4045,11 @@ router.get("/branch_transactions", auth, async(req, res, next) => {
             }))
         ];
 
-        // Get unique account numbers
-        const accountNumbers = [...new Set(transformedTransactions.map(t => t.account_number))];
-
-        let finalTransactions = transformedTransactions;
-
-        if (accountNumbers.length > 0) {
-            // Fetch images from Oracle DB
-            const imagesQuery = `
-                SELECT 
-                    CA.CUST_AC_NO,
-                    CI.IMAGE_TEXT AS PROFILE_IMAGE,
-                    SI.SIG_TEXT AS SIGN_IMAGE
-                FROM fcubsprd.STTM_CUST_ACCOUNT CA
-                LEFT JOIN fcubsprd.STTM_CUST_IMAGE CI ON CA.CUST_NO = CI.CUSTOMER_NO
-                LEFT JOIN fcubsprd.svtm_cif_sig_det SI ON CA.CUST_NO = SI.CIF_ID
-                WHERE CA.CUST_AC_NO IN (${accountNumbers.map((_, i) => `:${i + 1}`).join(',')})
-            `;
-
-            const imagesResult = await executeQuery(
-                imagesQuery,
-                accountNumbers,
-                {
-                    fetchInfo: {
-                        PROFILE_IMAGE: { type: oracledb.STRING },
-                        SIGN_IMAGE: { type: oracledb.STRING }
-                    }
-                }
-            );
-
-            // Create a map of account numbers to their images
-            const accountImages = {};
-            if (imagesResult.success && imagesResult.data) {
-                imagesResult.data.forEach(row => {
-                    accountImages[row.CUST_AC_NO] = {
-                        profile_image: row.PROFILE_IMAGE ? 
-                            `data:image/jpeg;base64,${row.PROFILE_IMAGE}` : null,
-                        sign_image: row.SIGN_IMAGE ? 
-                            `data:image/jpeg;base64,${row.SIGN_IMAGE}` : null
-                    };
-                });
-            }
-
-            // Add images to transactions and sort by request_date
-            finalTransactions = transformedTransactions
-                .map(transaction => ({
-                    ...transaction,
-                    profile_image: accountImages[transaction.account_number]?.profile_image || null,
-                    sign_image: accountImages[transaction.account_number]?.sign_image || null
-                }))
-                .sort((a, b) => new Date(b.request_date) - new Date(a.request_date));
-        }
+        // Customer photo / signature are no longer joined in from FlexCube here: they were
+        // fetched for every account on every refresh of this list. Screens ask
+        // /account_images/:account_number when a row is opened (as get_assigned_to_me does).
+        let finalTransactions = transformedTransactions
+            .sort((a, b) => new Date(b.request_date) - new Date(a.request_date));
 
         // Calculate summary
         const summary = {
@@ -4412,8 +4207,8 @@ const computeBranchStats = (transactions, branchCode) => {
     let waitStats = { min: 0, max: 0, avg: 0 };
     if (waitingTimes.length > 0) {
         waitStats = {
-            min: Math.min(...waitingTimes),
-            max: Math.max(...waitingTimes),
+            min: waitingTimes.reduce((m, v) => (v < m ? v : m), Infinity),
+            max: waitingTimes.reduce((m, v) => (v > m ? v : m), -Infinity),
             avg: (waitingTimes.reduce((a, b) => a + b, 0) / waitingTimes.length).toFixed(1),
         };
     }
@@ -4911,39 +4706,33 @@ async function assignTellerBySystem(branch) {
         const today = new Date();
         today.setHours(0, 0, 0, 0);
         
-        const assignmentCounts = await Promise.all(tellers.map(async teller => {
-            const count = await Promise.all([
-                Deposit.countDocuments({
-                    branch: branch,
-                    assigned_to: teller.user,
-                    assigned_date: { $gte: today }
-                }),
-                Withdraw.countDocuments({
-                    branch: branch,
-                    assigned_to: teller.user,
-                    assigned_date: { $gte: today }
-                }),
-                Transfer.countDocuments({
-                    branch: branch,
-                    assigned_to: teller.user,
-                    assigned_date: { $gte: today }
-                }),
-                Other_Bank_Transfer.countDocuments({
-                    branch: branch,
-                    assigned_to: teller.user,
-                    assigned_date: { $gte: today }
-                }),
-                Air_Ticket_Payment.countDocuments({
-                    branch: branch,
-                    assigned_to: teller.user,
-                    assigned_date: { $gte: today }
-                })
-            ]);
+        // One grouped query per collection (5 in total) instead of 5 counts per teller on
+        // every ticket. Same numbers as the per-teller countDocuments it replaces: the filter
+        // goes through the same schema casting, and tellers with no tickets today count as 0.
+        // Uses the { branch, assigned_date, assigned_to } index.
+        const tellerNames = [...new Set(tellers.map(teller => teller.user))];
+        const perCollection = await Promise.all(
+            [Deposit, Withdraw, Transfer, Other_Bank_Transfer, Air_Ticket_Payment].map(Model =>
+                Model.aggregate([
+                    { $match: Model.find().cast(Model, {
+                        branch: branch,
+                        assigned_to: { $in: tellerNames },
+                        assigned_date: { $gte: today }
+                    }) },
+                    { $group: { _id: "$assigned_to", count: { $sum: 1 } } }
+                ])
+            )
+        );
+        const totalsByTeller = new Map();
+        for (const rows of perCollection) {
+            for (const row of rows) {
+                totalsByTeller.set(row._id, (totalsByTeller.get(row._id) || 0) + row.count);
+            }
+        }
 
-            return {
-                teller,
-                totalAssignments: count.reduce((a, b) => a + b, 0)
-            };
+        const assignmentCounts = tellers.map(teller => ({
+            teller,
+            totalAssignments: totalsByTeller.get(teller.user) || 0
         }));
 
         // Sort tellers by assignment count and get the one with least assignments
@@ -5737,7 +5526,7 @@ router.post("/check-maker-checker", auth, async (req, res) => {
  * This handles the full withdrawal workflow including limit checks, denomination validation,
  * maker-checker threshold, Flexcube SOAP transaction, and till updates
  */
-router.post("/process-withdraw-with-denomination", auth, async (req, res) => {
+router.post("/process-withdraw-with-denomination", auth, withPostingLock(() => 'Withdraw', (req) => req.body?.withdraw_id, async (req, res) => {
     try {
         const {
             withdraw_id,
@@ -6003,12 +5792,12 @@ router.post("/process-withdraw-with-denomination", auth, async (req, res) => {
             message: "Failed to process withdrawal"
         });
     }
-});
+}));
 
 /**
  * Process E-Check transaction with denomination (Teller posting - same as withdraw)
  */
-router.post("/process-echeck-with-denomination", auth, async (req, res) => {
+router.post("/process-echeck-with-denomination", auth, withPostingLock(() => 'ECheck', (req) => req.body?.echeck_id, async (req, res) => {
     try {
         const {
             echeck_id,
@@ -6280,12 +6069,12 @@ router.post("/process-echeck-with-denomination", auth, async (req, res) => {
             message: "Failed to process E-Check"
         });
     }
-});
+}));
 
 /**
  * Process deposit transaction with denomination (Teller posting)
  */
-router.post("/process-deposit-with-denomination", auth, async (req, res) => {
+router.post("/process-deposit-with-denomination", auth, withPostingLock(() => 'Deposit', (req) => req.body?.deposit_id, async (req, res) => {
     try {
         const {
             deposit_id,
@@ -6476,7 +6265,7 @@ router.post("/process-deposit-with-denomination", auth, async (req, res) => {
             message: "Failed to process deposit"
         });
     }
-});
+}));
 
 /**
  * Process transfer transaction (Teller posting)
@@ -6486,7 +6275,7 @@ router.post("/process-deposit-with-denomination", auth, async (req, res) => {
  * No denomination needed (no cash involved)
  * Only SOAP transaction to Flexcube
  */
-router.post("/process-transfer", auth, async (req, res) => {
+router.post("/process-transfer", auth, withPostingLock(() => 'Transfer', (req) => req.body?.transfer_id, async (req, res) => {
     try {
         const {
             transfer_id,
@@ -6675,7 +6464,7 @@ router.post("/process-transfer", auth, async (req, res) => {
             message: "Failed to process transfer"
         });
     }
-});
+}));
 
 /**
  * Get transactions pending checker approval
@@ -6683,12 +6472,22 @@ router.post("/process-transfer", auth, async (req, res) => {
  */
 router.get("/pending-checker-transactions", auth, async (req, res) => {
     try {
-        const { branch } = req.query;
-
-        const query = { status: 'pending_checker' };
-        if (branch) {
-            query.branch = branch;
+        // Own branch only (decided for the 500+ user rollout): this list is polled every 30 s
+        // by every open Pending Checker tab and used to return the whole bank's queue. The
+        // branch comes from the signed-in user, never from the request.
+        const user = await User.findById(req.user._id).lean();
+        if (!user) {
+            return res.status(400).json({ error: true, message: "User not found" });
         }
+        if (!user.branch) {
+            return res.status(200).json({
+                error: false,
+                message: "Found 0 transactions pending checker approval",
+                data: []
+            });
+        }
+
+        const query = { status: 'pending_checker', branch: user.branch };
 
         // Get pending deposits, withdrawals, echecks and transfers
         const [pendingDeposits, pendingWithdraws, pendingEChecks, pendingTransfers] = await Promise.all([
@@ -6724,7 +6523,7 @@ router.get("/pending-checker-transactions", auth, async (req, res) => {
 /**
  * Approve or reject pending transaction (Checker action)
  */
-router.post("/approve-pending-transaction", auth, async (req, res) => {
+router.post("/approve-pending-transaction", auth, withPostingLock(checkerLockKind, (req) => req.body?.transaction_id, async (req, res) => {
     try {
         const {
             transaction_id,
@@ -7003,7 +6802,7 @@ router.post("/approve-pending-transaction", auth, async (req, res) => {
             message: "Failed to process approval"
         });
     }
-});
+}));
 
 /**
  * Get transaction details with denomination info
@@ -7314,14 +7113,7 @@ router.post("/generate-otp", otpLimiter, async (req, res) => {
         const encodedContent = encodeURIComponent(smsContent);
         const smsUrl = `https://smsgateway.zemenbank.com/http-api/send?username=${smsUsername}&password=${smsPassword}&to=${phoneNumber}&from=8011&coding=8&content=${encodedContent}`;
 
-        try {
-            const response = await fetch(smsUrl);
-            if (!response.ok) {
-                console.error("[GENERATE_OTP] SMS sending failed");
-            }
-        } catch (smsError) {
-            console.error("[GENERATE_OTP] SMS sending error");
-        }
+        sendSmsInBackground(smsUrl, "[GENERATE_OTP] SMS sending failed", "[GENERATE_OTP] SMS sending error");
 
         // Mask phone number for response (show only last 4 digits)
         const maskedPhone = phoneNumber.replace(/(\d{3})(\d+)(\d{4})/, '$1****$3');

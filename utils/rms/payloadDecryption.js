@@ -7,7 +7,6 @@ function getKey() {
   if (!key || key.length !== 64) {
     throw new Error(`REQUEST_ENCRYPTION_KEY must be a 64-char hex string (got: ${key ? `length=${key.length}` : 'undefined'})`);
   }
-  console.log(`[PayloadDecrypt] Key fingerprint: ${key.substring(0, 8)}... (length: ${key.length})`);
   return Buffer.from(key, 'hex');
 }
 
@@ -28,13 +27,11 @@ export function decryptPayload(encryptedPayload) {
 
   const [ivHex, authTagHex, ciphertextHex] = parts;
 
-  console.log(`[PayloadDecrypt] IV length: ${ivHex.length}, AuthTag length: ${authTagHex.length}, Ciphertext length: ${ciphertextHex.length}`);
 
   const iv = Buffer.from(ivHex, 'hex');
   const authTag = Buffer.from(authTagHex, 'hex');
   const ciphertext = Buffer.from(ciphertextHex, 'hex');
 
-  console.log(`[PayloadDecrypt] IV bytes: ${iv.length}, AuthTag bytes: ${authTag.length}, Ciphertext bytes: ${ciphertext.length}`);
 
   const decipher = crypto.createDecipheriv(ALGORITHM, getKey(), iv);
   decipher.setAuthTag(authTag);
@@ -46,7 +43,6 @@ export function decryptPayload(encryptedPayload) {
   ]);
 
   const decryptedStr = decryptedBuffer.toString('utf8');
-  console.log(`[PayloadDecrypt] Successfully decrypted, length: ${decryptedStr.length}`);
 
   return JSON.parse(decryptedStr);
 }

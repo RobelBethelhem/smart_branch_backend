@@ -359,6 +359,11 @@ withdrawSchema.index({ account_number: 1, request_date: -1 });
 withdrawSchema.index({ branch: 1, status: 1, request_date: -1 });
 withdrawSchema.index({ assigned_to: 1, request_date: -1 });
 withdrawSchema.index({ status: 1, posted_date: -1 });
+// Teller auto-assignment counts today's tickets per teller in a branch (assignTellerBySystem).
+withdrawSchema.index({ branch: 1, assigned_date: 1, assigned_to: 1 });
+// Date-range views: all branches (Branch_Management, admin search) and one branch's history.
+withdrawSchema.index({ request_date: -1 });
+withdrawSchema.index({ branch: 1, request_date: -1 });
 // Teller/Admin search-by-customer within today's window (/transactions).
 withdrawSchema.index({ Customer_Unique_Number: 1, request_date: -1 });
 

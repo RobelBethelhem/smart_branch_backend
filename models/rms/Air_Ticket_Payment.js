@@ -24,7 +24,16 @@ const air_ticket_paymentSchema =  new Schema({
     },
 
 
-    amount_in_words: { 
+    // KNOWN ISSUE, left as it is because air-ticket payments are not in use for now:
+    // `unique: true` on the amount in words means a second air-ticket payment for the same
+    // amount is rejected with a duplicate-key error (E11000 on index amount_in_words_1).
+    // Before this feature is switched on: remove `unique: true` here AND drop that index in
+    // MongoDB (db.air_ticket_payments.dropIndex("amount_in_words_1")); removing it here alone
+    // does not delete an index that already exists.
+    // Air-ticket payments also have no FlexCube posting route yet (they are only marked as
+    // posted through /transaction_posted), so the posting lock in utils/rms/postingLock.js
+    // does not cover them. Put any future air-ticket posting route under withPostingLock too.
+    amount_in_words: {
         type: String,
         required: true,
         unique: true,
@@ -141,6 +150,11 @@ const air_ticket_paymentSchema =  new Schema({
     air_ticket_paymentSchema.index({ branch: 1, status: 1, request_date: -1 });
     air_ticket_paymentSchema.index({ assigned_to: 1, request_date: -1 });
     air_ticket_paymentSchema.index({ status: 1, posted_date: -1 });
+    // Teller auto-assignment counts today's tickets per teller in a branch (assignTellerBySystem).
+    air_ticket_paymentSchema.index({ branch: 1, assigned_date: 1, assigned_to: 1 });
+    // Date-range views: all branches (Branch_Management, admin search) and one branch's history.
+    air_ticket_paymentSchema.index({ request_date: -1 });
+    air_ticket_paymentSchema.index({ branch: 1, request_date: -1 });
     // Teller/Admin search-by-customer/account within today's window (/transactions).
     air_ticket_paymentSchema.index({ Customer_Unique_Number: 1, request_date: -1 });
     air_ticket_paymentSchema.index({ account_number: 1, request_date: -1 });

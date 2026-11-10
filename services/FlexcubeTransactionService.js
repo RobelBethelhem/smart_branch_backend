@@ -12,14 +12,18 @@ import { executeQuery, executeTransaction } from '../lib/db.js';
 import CustomerCategoryLimit from '../models/rms/CustomerCategoryLimit.js';
 import MakerCheckerThreshold from '../models/rms/MakerCheckerThreshold.js';
 import XrefCounter from '../models/rms/XrefCounter.js';
+import { notePostedToFlexcube } from '../utils/rms/postingLock.js';
 
 // ============================================
 // DEBUG LOGGING UTILITY
 // ============================================
-const DEBUG = true; // Set to false to disable debug logging
+// Verbose step-by-step logging of every posting (incl. full SOAP request/response). Off by
+// default: on Linux console output is written synchronously, so ~45 log blocks per posting
+// stalled every other request. Set FLEXCUBE_DEBUG=true to turn it on while troubleshooting.
+const isDebug = () => process.env.FLEXCUBE_DEBUG === 'true';
 
 function debugLog(section, message, data = null) {
-    if (!DEBUG) return;
+    if (!isDebug()) return;
     const timestamp = new Date().toISOString();
     console.log('\n' + '='.repeat(60));
     console.log(`[${timestamp}] [FlexcubeService] [${section}]`);
@@ -151,7 +155,7 @@ export async function getDailyWithdrawalTotal(cif) {
           AND A.AC_CCY = 'ETB'
           AND A.RELATED_CUSTOMER = :1
           AND A.CUST_GL = 'A'
-          AND TRUNC(A.TRN_DT) = TRUNC(SYSDATE)
+          AND A.TRN_DT >= TRUNC(SYSDATE) AND A.TRN_DT < TRUNC(SYSDATE) + 1
           AND A.trn_ref_no NOT IN (
                 SELECT AL.trn_ref_no
                 FROM fcubsprd.actb_daily_log AL
@@ -553,6 +557,11 @@ export async function executeFlexcubeTransaction(soapMessage, endpoint = null) {
             }
         }
 
+        // FlexCube accepted the posting. Tell the posting lock (utils/rms/postingLock.js): if this
+        // request now fails before the new status is saved, the transaction must not be posted again.
+        if (isSuccess) {
+            notePostedToFlexcube(trnRefNo);
+        }
         const result = {
             success: isSuccess,
             trnRefNo,

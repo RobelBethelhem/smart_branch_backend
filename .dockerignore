@@ -1,0 +1,33 @@
+# Secrets and local config — runtime config comes from the container environment
+.env
+.env.*
+
+# Installed / built inside the image
+node_modules
+dist
+
+# Uploaded files are runtime data (mounted volume), not part of the image
+uploads
+
+# Windows-only fingerprint capture service (ZKCapture.exe + .NET SDK). It drives a USB
+# scanner and must run on the PC the scanner is plugged into — it cannot run on Linux.
+services/fingerprint
+
+# Deployment files (compose, scripts, runbook): used on the host, not inside the image
+deploy
+
+# Development / test tooling and one-off scripts
+.git
+.gitignore
+.claude
+CLAUDE.md
+loadtest
+webpack.config.js
+app3.js
+src
+image.png
+crackHash.js
+wordlist.txt
+Dockerfile
+.dockerignore
+*.log
