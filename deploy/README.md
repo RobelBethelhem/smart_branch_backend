@@ -395,6 +395,35 @@ as assigned or pending, and the system refuses to post it again.
    If FlexCube does NOT have the reference after all, only delete the `unrecordedpostings`
    record; the transaction can then be posted normally.
 
+### Requests expire at the end of the day
+
+A customer's request and its reference code are valid until **midnight of the day it was made**
+(server time, Africa/Addis_Ababa). The rule is in `utils/rms/requestExpiry.js`.
+
+| Request at midnight | What happens |
+|---|---|
+| Not posted to FlexCube yet (requested, assigned, waiting for a checker) | Status becomes `expired`. It can no longer be assigned, posted or approved. The customer makes a new request. The record is kept, with `expired_at`, `expiry_reason` and `status_before_expiry` |
+| Posted, not authorized | Never expires. Stays in the Authorizer's list, marked "Overdue" |
+| Posted or authorized, not audited | Never expires. Stays in the Auditor's list, marked "Overdue" |
+
+- The backend marks expired requests when it starts and every 10 minutes after that. The log
+  line is `[REQUEST_EXPIRY] N request(s) ... are now expired`. The posting routes also check the
+  date themselves, so nothing can be posted in the minutes before the next run.
+- **The first start after this release closes every old unserved request in the database in
+  one go.** That is expected, and it only touches requests that never moved money.
+- The Authorizer's and Auditor's lists go back `CARRY_OVER_DAYS` days (default 7, set in
+  `env/backend.env`). Older unfinished items are still counted in the warning at the top of
+  Branch Record → Statistics.
+- To see what expired: Branch Record shows the status "Expired" and counts them as "Not
+  served". In the MongoDB shell: `db.deposits.find({ status: "expired" }).sort({ expired_at: -1 })`.
+- To undo one expiry by hand (for example the server clock was wrong), set the status back
+  from the saved one:
+  ```js
+  db.deposits.updateOne({ Customer_Unique_Number: "12345678" },
+    [{ $set: { status: "$status_before_expiry" } }, { $unset: ["expired_at", "expiry_reason", "status_before_expiry"] }])
+  ```
+  It expires again at the next run unless its `request_date` is today.
+
 ### MongoDB shell
 
 ```bash

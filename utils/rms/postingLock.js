@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import PostingLock from "../../models/rms/PostingLock.js";
 import UnrecordedPosting from "../../models/rms/UnrecordedPosting.js";
+import { expireIfDue, EXPIRED_MESSAGE } from "./requestExpiry.js";
 
 // Stops one transaction from being posted to FlexCube twice.
 //
@@ -28,6 +29,10 @@ import UnrecordedPosting from "../../models/rms/UnrecordedPosting.js";
 //
 // The lock spans the maker's posting and the checker's approval of the same transaction
 // (same kind and id), so those two cannot overlap either.
+//
+// The wrapper is also where a request that was not completed on the day it was made is
+// refused (utils/rms/requestExpiry.js): the check sits in front of every route that posts to
+// FlexCube, whatever the sweep that marks such requests has or has not done yet.
 
 const BUSY_MESSAGE = "This transaction is already being processed. Please wait a moment, then refresh the list.";
 const unrecordedMessage = (ref) =>
@@ -92,6 +97,12 @@ export function withPostingLock(getKind, getId, handler) {
                     message: unrecordedMessage(unrecorded.trn_ref_no),
                     data: { flexcubeTrnRef: unrecorded.trn_ref_no }
                 });
+            }
+
+            // Not completed on the day it was made: expired, never posted.
+            if (await expireIfDue(kind, id)) {
+                console.warn(`[POSTING_LOCK] ${key} refused: the request has expired`);
+                return res.status(400).json({ error: true, message: EXPIRED_MESSAGE, data: { status: 'expired' } });
             }
 
             await postingContext.run(context, () => handler(req, res, next));

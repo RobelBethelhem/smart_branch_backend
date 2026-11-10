@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import requestExpiryFields from './requestExpiryFields.js';
 import ECheckCounter from './ECheckCounter.js';
 import XrefCounter from './XrefCounter.js';
 const Schema = mongoose.Schema;
@@ -92,7 +93,8 @@ const eCheckSchema = new Schema({
             'authorized',
             'audited',
             'delayed',
-            'rejected'           // Rejected due to limit exceeded or other reasons
+            'rejected',           // Rejected due to limit exceeded or other reasons
+            'expired'            // Not completed on the day it was made (utils/rms/requestExpiry.js)
         ],
         default: 'requested',
         trim: true,
@@ -375,5 +377,6 @@ eCheckSchema.index({ branch: 1, request_date: -1 });
 // Teller/Admin search-by-customer within today's window (/transactions).
 eCheckSchema.index({ Customer_Unique_Number: 1, request_date: -1 });
 
+eCheckSchema.add(requestExpiryFields);
 const ECheck = mongoose.model('ECheck', eCheckSchema);
 export default ECheck;

@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import requestExpiryFields from './requestExpiryFields.js';
 import DailyCounter from './DailyCounter.js';
 import XrefCounter from './XrefCounter.js';
 const Schema = mongoose.Schema;
@@ -80,7 +81,8 @@ const withdrawSchema = new Schema({
             'authorized',
             'audited',
             'delayed',
-            'rejected'           // NEW: Rejected due to limit exceeded or other reasons
+            'rejected',           // NEW: Rejected due to limit exceeded or other reasons
+            'expired'            // Not completed on the day it was made (utils/rms/requestExpiry.js)
         ],
         default: 'requested',
         trim: true,
@@ -367,6 +369,7 @@ withdrawSchema.index({ branch: 1, request_date: -1 });
 // Teller/Admin search-by-customer within today's window (/transactions).
 withdrawSchema.index({ Customer_Unique_Number: 1, request_date: -1 });
 
+withdrawSchema.add(requestExpiryFields);
 const Withdraw = mongoose.model('Withdraw', withdrawSchema);
 export default Withdraw;
 

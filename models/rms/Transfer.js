@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import requestExpiryFields from './requestExpiryFields.js';
 import DailyCounter from './DailyCounter.js';
 import XrefCounter from './XrefCounter.js';
 
@@ -116,7 +117,8 @@ const transferSchema = new Schema({
             'authorized',
             'audited',
             'delayed',
-            'rejected'           // NEW: Rejected
+            'rejected',           // NEW: Rejected
+            'expired'            // Not completed on the day it was made (utils/rms/requestExpiry.js)
         ],
         default: 'requested',
         trim: true,
@@ -277,5 +279,6 @@ transferSchema.index({ branch: 1, request_date: -1 });
 // Teller/Admin search-by-customer within today's window (/transactions).
 transferSchema.index({ Customer_Unique_Number: 1, request_date: -1 });
 
+transferSchema.add(requestExpiryFields);
 const Transfer = mongoose.model('Transfer', transferSchema);
 export default Transfer;

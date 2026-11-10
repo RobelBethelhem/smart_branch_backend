@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import requestExpiryFields from './requestExpiryFields.js';
 import DailyCounter from './DailyCounter.js';
 const Schema = mongoose.Schema;
 
@@ -106,7 +107,7 @@ const other_bank_transferSchema =  new Schema({
     status: { 
         type: String,
         required: true,
-        enum: ['requested', 'assigned_by_csr', 'assigned', 'posted',  'authorized', 'audited', 'delayed'],
+        enum: ['requested', 'assigned_by_csr', 'assigned', 'posted',  'authorized', 'audited', 'delayed', 'expired'],  // expired: utils/rms/requestExpiry.js
         default: 'requested',
         trim: true,
     },
@@ -190,6 +191,7 @@ const other_bank_transferSchema =  new Schema({
     other_bank_transferSchema.index({ Customer_Unique_Number: 1, request_date: -1 });
     other_bank_transferSchema.index({ account_number: 1, request_date: -1 });
 
+    other_bank_transferSchema.add(requestExpiryFields);
     const Other_Bank_Transfer = mongoose.model('Other_Bank_Transfer', other_bank_transferSchema);
     export default Other_Bank_Transfer;
 

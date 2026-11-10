@@ -4,17 +4,17 @@
 //  • A request moves money only when it is posted to FlexCube, so every AMOUNT counts completed
 //    requests only (status posted, authorized or audited). Requests that are still waiting, were
 //    never served or were rejected are counted on their own and never added to a money total.
-//  • "Not served": a request that is still open on a later day than the one it was made. Its
-//    reference code stops working at midnight (the teller screens and the reference lookup read
-//    today's requests only), so it can no longer be served. The record itself is kept.
-//    A request waiting for a checker is the exception: that queue has no date limit.
+//  • "Not served": a request that was not completed on the day it was made. It has the status
+//    "expired" (utils/rms/requestExpiry.js), or is about to get it: still open on a later day.
+//    The record itself is kept.
 //  • A request belongs to the teller who posted it, or, while it is not posted, to the teller
 //    it is assigned to.
 //  • Amounts are added up in cents, so long sums do not pick up floating-point error.
 
 const COMPLETED_STATUSES = new Set(['posted', 'authorized', 'audited']);
-// Open statuses that stop being reachable after the day of the request.
-const EXPIRING_STATUSES = new Set(['requested', 'assigned', 'assigned_by_csr', 'delayed']);
+// Open statuses that expire at the end of the day of the request (same list as requestExpiry.js;
+// not imported from there so this file stays free of database code and can be tested alone).
+const EXPIRING_STATUSES = new Set(['requested', 'assigned', 'assigned_by_csr', 'delayed', 'pending_checker']);
 // Money leaving the customer's account. ('other-bank-transfer' is the old spelling of the type.)
 const OUTGOING_TYPES = new Set(['withdraw', 'echeck', 'other_bank_transfer', 'other-bank-transfer', 'air_ticket_payment']);
 
@@ -50,6 +50,7 @@ const moneyDirection = (type, beneficiaryBranch, branchCode) => {
 const bucketOf = (status, requestDate, startOfToday) => {
     if (COMPLETED_STATUSES.has(status)) return 'completed';
     if (status === 'rejected') return 'rejected';
+    if (status === 'expired') return 'notServed';
     if (EXPIRING_STATUSES.has(status) && requestDate && new Date(requestDate) < startOfToday) return 'notServed';
     return 'pending';
 };
@@ -91,8 +92,7 @@ export const computeBranchStats = (transactions, branchCode, now = new Date()) =
     const turnaround = newDuration();
     const hourSlots = {};
     const dayCounts = {};
-    // Work that has left the teller but is not finished, and how much of it is from earlier
-    // days (those rows have dropped out of the Authorizer / Auditor queues, which show today only).
+    // Work that has left the teller but is not finished, and how much of it is from earlier days.
     const awaitingAuthorization = { count: 0, olderThanToday: 0 };
     const awaitingAudit = { count: 0, olderThanToday: 0 };
 

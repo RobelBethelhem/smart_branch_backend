@@ -22,6 +22,7 @@ import { fileURLToPath } from 'url';
 import * as FlexcubeTransactionService from '../../services/FlexcubeTransactionService.js';
 import { withPostingLock } from '../../utils/rms/postingLock.js';
 import { computeBranchStats, STATS_PROJECTION } from '../../utils/rms/branchStats.js';
+import { isExpiredRequest, carryOverStart, EXPIRED_MESSAGE } from '../../utils/rms/requestExpiry.js';
 import CustomerCategoryLimit from '../../models/rms/CustomerCategoryLimit.js';
 import MakerCheckerThreshold from '../../models/rms/MakerCheckerThreshold.js';
 import crypto from 'crypto';
@@ -2157,7 +2158,7 @@ router.post("/assigned_to_me", auth, roleCheck(["Teller", "Maker"]), async(req, 
             // Check transaction status first
             const existingTransaction = await Model.findOne({
                 _id: transaction.id
-            }).select('status');
+            }).select('status request_date');
 
             if (!existingTransaction) {
                 updateResults.skipped.push({
@@ -2171,6 +2172,15 @@ router.post("/assigned_to_me", auth, roleCheck(["Teller", "Maker"]), async(req, 
                 updateResults.skipped.push({
                     id: transaction.id,
                     reason: `Transaction status is ${existingTransaction.status}`
+                });
+                continue;
+            }
+
+            // Not completed on the day it was made: expired (utils/rms/requestExpiry.js).
+            if (isExpiredRequest(existingTransaction)) {
+                updateResults.skipped.push({
+                    id: transaction.id,
+                    reason: EXPIRED_MESSAGE
                 });
                 continue;
             }
@@ -2289,6 +2299,11 @@ router.post("/transaction_posted", auth, roleCheck(["Teller"]), async(req, res, 
                 error: true,
                 message: "Transaction not found"
             });
+        }
+
+        // Not completed on the day it was made: expired (utils/rms/requestExpiry.js).
+        if (isExpiredRequest(transaction)) {
+            return res.status(400).json({ error: true, message: EXPIRED_MESSAGE, data: { status: 'expired' } });
         }
 
         // Verify transaction status and assignment
@@ -3047,10 +3062,12 @@ router.get("/get_posted_data", auth, roleCheck(["Authorizer","Teller"]), async(r
         const tomorrow = new Date(today);
         tomorrow.setDate(tomorrow.getDate() + 1);
 
-        // Query parameters for filtering
+        // Today's requests, plus posted ones from the last CARRY_OVER_DAYS days still waiting for authorization.
+        // (This list showed today's requests only. A posted transaction has already moved
+        // money, so it must not drop out of the list at midnight with the step undone.)
         const dateFilter = {
             request_date: {
-                $gte: today,
+                $gte: carryOverStart(today),
                 $lt: tomorrow
             }
         };
@@ -3170,10 +3187,12 @@ router.get("/get_authorized_data", auth, roleCheck(["Auditor","Teller"]), async(
         const tomorrow = new Date(today);
         tomorrow.setDate(tomorrow.getDate() + 1);
 
-        // Query parameters for filtering
+        // Today's requests, plus ones from the last CARRY_OVER_DAYS days still waiting for audit.
+        // (This list showed today's requests only. A posted transaction has already moved
+        // money, so it must not drop out of the list at midnight with the step undone.)
         const dateFilter = {
             request_date: {
-                $gte: today,
+                $gte: carryOverStart(today),
                 $lt: tomorrow
             }
         };

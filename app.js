@@ -4,6 +4,7 @@ config(); // Load env variables first
 
 import dbConnect from "./dbConnect.js";
 import { initializeOracle } from "./lib/db.js";
+import { startRequestExpirySweep } from "./utils/rms/requestExpiry.js";
 import authRoutes from "./routes/rms/auth.js";
 import refreshTokenRoutes from "./routes/rms/refreshToken.js";
 import userRoutes from "./routes/rms/users.js";
@@ -139,6 +140,8 @@ app.use((req, res, next) => (req.path.startsWith('/api/') ? next() : uploadsStat
 
 dbConnect();
 initializeOracle(); // Initialize Oracle client and connection pool
+// Requests not completed on the day they were made are closed as "expired".
+startRequestExpirySweep();
 
 // NOTE: express.json() is already registered above (with the JSON-validation
 // `verify` hook), so the duplicate plain express.json() that used to be here was

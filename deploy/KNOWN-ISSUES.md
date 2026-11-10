@@ -18,6 +18,7 @@ File and line references are to the code as of that review.
 | B6 | `smart_branch_backoffice/src/views/admin/Chat/chat.js:787` | After "Assign" it calls `fetchData()` without the search term; the server answers 400 and the table is not refreshed | `fetchData(searchTerm)` |
 | B7 | `smart_branch_backend/models/rms/Air_Ticket_Payment.js` | `amount_in_words` is declared `unique: true`. A second air-ticket payment for the same amount is rejected with a duplicate-key error. **Left as it is on purpose** (air-ticket payments are not in use); the code carries a comment explaining it | Before switching the feature on: remove `unique` from that field and drop the `amount_in_words_1` index in MongoDB |
 | B8 | `smart_branch_backoffice/src/views/pages/login/Login.js:147` | The login page embeds a decorative 3D model from `sketchfab.com`. Branch PCs have no internet, so it shows "Loading 3D model" forever. It does not hold up the page | Remove the frame, or replace it with a local image |
+| B9 | `smart_branch_backoffice/src/views/admin/Authorize/Authorize.js:119` | The screen shows "Transactions authorized successfully!" whenever the server answers 200, also when the server skipped every selected transaction (for example "not authorized by you in Flexcube"). The rows then simply stay in the list | Show the server's `message` and `skippedTransactions` instead of a fixed success text |
 
 ## Double posting (fixed)
 
@@ -46,32 +47,28 @@ Not covered:
 - **Other-bank transfers and air-ticket payments** have no FlexCube posting route (they are
   marked as posted by hand through `/transaction_posted`), so there is nothing to lock.
 
-## Requests that are not finished on the day they are made (not changed — needs a decision)
+## Requests that are not completed on the day they are made (end-of-day expiry)
 
-The reference code (`Customer_Unique_Number`, 8 random digits made by the customer app) has no
-expiry time of its own. A request simply stops being reachable at **midnight of the day it was
-made** (server time), because these routes read today's requests only:
+Decision (November 2026): a request and its reference code are valid until the **end of the
+day** it was made. Implemented in `utils/rms/requestExpiry.js`; how to operate it is in the
+README ("Requests expire at the end of the day").
 
-| Who | Route | After midnight |
+| # | Problem found | State |
 |---|---|---|
-| Customer app | `get_account_number_by_reference_number`, edit, delete | "Invalid or Expired Reference Number" |
-| Teller | `transactions` (search by code), `get_assigned_to_me` | Not found / not listed |
-| Admin, Authorizer | `get_assigned_transaction_per_brnach` (Reassignment) | Not listed |
-| Authorizer | `get_posted_data` | Not listed |
-| Auditor | `get_authorized_data` | Not listed |
+| E1 | An unserved request stayed `requested` / `assigned` for ever and was only visible in Branch Record | **Fixed.** It gets the final status `expired` (with time, reason and the status it had) at the end of the day. Nothing is deleted |
+| E2 | The posting routes checked the status only, not the date, so a request from an earlier day could still be posted by calling the route with its id | **Fixed.** The five FlexCube posting routes, `/transaction_posted` and `/assigned_to_me` refuse an expired request |
+| E3 | A transaction posted to FlexCube but not authorized the same day dropped out of the Authorizer's list (same for the Auditor's list): the money had moved and the control step was silently skipped | **Fixed.** Posted work never expires and stays in those lists, marked "Overdue", for `CARRY_OVER_DAYS` days (default 7); older items are counted in Branch Record's warning |
+| E4 | The reference code is 8 random digits and unique per collection for all time. As records accumulate, a new request will now and then collide with an old one and fail to save | Open. Retry with a new code on a duplicate, or make the code unique per day |
+| E5 | The customer's SMS does not say how long the code is valid | Open. Add "valid today only" to the SMS text (six places in `ZSmartBrannchRequests.js`) |
+| E6 | E-cheques are in neither the Authorizer's nor the Auditor's list, and `/transaction_authorized` does not handle them. A posted e-cheque stays `posted`, so Branch Record's warning counts it as not authorized for ever | Open. Decide whether e-cheques need authorization here; if yes, add them to both lists and the route |
 
-Nothing changes the record. It keeps its last status for ever and is only visible in Branch
-Record. The Branch Record statistics now count such requests as "Not served" and warn about
-posted or authorized transactions left over from earlier days, but that is worked out when
-the page is read; the stored status is still `assigned`, `posted` and so on.
+A request waiting for a checker (`pending_checker`) expires like the others: nothing has been
+posted to FlexCube until the checker approves, and the customer is no longer at the counter the
+next day. To keep such requests alive instead, remove `pending_checker` from
+`EXPIRING_STATUSES` in `utils/rms/requestExpiry.js`, in `utils/rms/branchStats.js` and in the
+backoffice's `Branch_Record/recordFormat.js`.
 
-| # | Problem | Suggested fix |
-|---|---|---|
-| E1 | An unserved request stays `requested` / `assigned` for ever. The `delayed` status exists but nothing sets it | Give each request an explicit `expires_at`; a job at end of day sets a final `expired` status with the time and reason. Never delete the record |
-| E2 | The posting routes check the status only, not the date. A request from an earlier day can still be posted by calling the route with its id | Refuse to post when the request is expired |
-| E3 | A transaction **posted to FlexCube** but not authorized the same day drops out of the Authorizer's list; the same for authorized but not audited. The money has moved, the control step is silently skipped | These must not expire. Keep them in the Authorizer / Auditor lists until done, oldest first, marked overdue |
-| E4 | The code is unique per collection for all time and only 8 digits. As records accumulate, a new request will now and then collide with an old one and fail to save | Retry with a new code on a duplicate, or make the code unique per day |
-| E5 | "Expired at midnight" follows the server clock, not the branch's business day | Decide the rule (end of business day is the usual one) and state it on the customer's SMS |
+"End of the day" is midnight on the server clock, not the branch's closing time.
 
 ## Performance work that was deferred
 

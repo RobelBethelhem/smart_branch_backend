@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import requestExpiryFields from './requestExpiryFields.js';
 import DailyCounter from './DailyCounter.js';
 const Schema = mongoose.Schema;
 
@@ -79,7 +80,7 @@ const air_ticket_paymentSchema =  new Schema({
     status: { 
         type: String,
         required: true,
-        enum: ['requested', 'assigned_by_csr', 'assigned', 'posted',  'authorized', 'audited', 'delayed'],
+        enum: ['requested', 'assigned_by_csr', 'assigned', 'posted',  'authorized', 'audited', 'delayed', 'expired'],  // expired: utils/rms/requestExpiry.js
         default: 'requested',
         trim: true,
     },
@@ -159,6 +160,7 @@ const air_ticket_paymentSchema =  new Schema({
     air_ticket_paymentSchema.index({ Customer_Unique_Number: 1, request_date: -1 });
     air_ticket_paymentSchema.index({ account_number: 1, request_date: -1 });
 
+    air_ticket_paymentSchema.add(requestExpiryFields);
     const Air_Ticket_Payment = mongoose.model('Air_Ticket_Payment', air_ticket_paymentSchema);
     export default Air_Ticket_Payment;
 
