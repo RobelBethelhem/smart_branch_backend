@@ -1,0 +1,61 @@
+# ZSmart Branch — DATABASE SERVER (10.1.2.143)
+#
+# MongoDB for ZSmart Branch:
+#   ZSmartBranch  ← smart_branch_backend (user: smartbranch_app). The customer-facing app and the
+#                   backoffice have no database of their own; they go through the backend.
+# Oracle FlexCube is the bank's core system and is NOT part of this stack.
+#
+#   docker compose up -d        start / apply changes
+#   docker compose ps           status (should show "healthy")
+#   docker compose logs -f      follow the MongoDB log
+#
+# Auto-restart: `restart: always` brings MongoDB back after a crash, after the Docker daemon
+# restarts, and after a server reboot (setup-host.sh enables Docker at boot).
+#
+# Networking: host mode, so MongoDB listens directly on this server's IP and the normal host
+# firewall (ufw / firewalld) applies. Published Docker ports would bypass that firewall.
+
+name: smartbranch-db
+
+services:
+  mongo:
+    image: mongo:${MONGO_VERSION:?Set MONGO_VERSION in .env}
+    container_name: smartbranch-mongo
+    restart: always
+    network_mode: host
+    command:
+      - mongod
+      - --auth
+      - --port
+      - "27017"
+      - --bind_ip
+      - 127.0.0.1,${MONGO_BIND_IP:?Set MONGO_BIND_IP (this server's IP) in .env}
+    environment:
+      TZ: ${TZ:-Africa/Addis_Ababa}
+      # Root account — created on the first start only (empty data directory).
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:?Set MONGO_ROOT_USERNAME in .env}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?Set MONGO_ROOT_PASSWORD in .env}
+      # Read by mongo-init/01-create-app-users.js on the first start.
+      SMARTBRANCH_DB_NAME: ${SMARTBRANCH_DB_NAME:-ZSmartBranch}
+      SMARTBRANCH_DB_PASSWORD: ${SMARTBRANCH_DB_PASSWORD:?Set SMARTBRANCH_DB_PASSWORD in .env}
+    volumes:
+      - ${MONGO_DATA_DIR:-/opt/smartbranch/mongo/data}:/data/db
+      - ./mongo-init:/docker-entrypoint-initdb.d:ro
+    ulimits:
+      nofile:
+        soft: 64000
+        hard: 64000
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--host", "127.0.0.1", "--port", "27017",
+             "--eval", "quit(db.adminCommand('ping').ok ? 0 : 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    # Give mongod time to flush and shut down cleanly.
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "10"

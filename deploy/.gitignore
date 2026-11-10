@@ -1,0 +1,6 @@
+# Real configuration holds passwords and keys — only the *.example templates belong in git.
+.env
+*.env
+!*.env.example
+# Remembered by app-server/deploy.sh for `rollback`
+.previous-tag

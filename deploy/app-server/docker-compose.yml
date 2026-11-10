@@ -1,0 +1,120 @@
+# ZSmart Branch — APPLICATION SERVER (10.1.2.132)
+#
+#   frontend    Smart_Branch              → http://10.1.2.132:3000  (customer-facing)
+#   backoffice  smart_branch_backoffice   → http://10.1.2.132:4000  (teller / manager / admin)
+#   backend     smart_branch_backend      → http://10.1.2.132:5000  (API)
+#
+# MongoDB runs on the DB server (10.1.2.143); FlexCube (Oracle) is the bank's core system.
+# Same ports as the current deployment, so bookmarks, the browser extension and CORS keep working.
+# The backoffice is nginx: it serves the built app and forwards /api/* to the backend.
+#
+#   docker compose build          build the images, tagged with IMAGE_TAG from .env
+#   docker compose up -d          start / update (recreates only what changed)
+#   docker compose ps             status — every service should be "healthy"
+#   docker compose logs -f backend
+#
+# Auto-restart:
+#   • restart: always   — a container whose process exits (crash, out-of-memory kill) is restarted
+#                         immediately; all containers come back after the Docker daemon restarts
+#                         or the server reboots (setup-host.sh enables Docker at boot).
+#   • healthchecks      — each image probes itself every 30 s. Docker does not restart a container
+#                         that is running but unhealthy (hung); the smartbranch-watchdog timer
+#                         installed by setup-host.sh does, for containers with the autoheal label.
+#   • `docker compose stop` / `down` are deliberate and are respected.
+
+name: smartbranch
+
+x-service-defaults: &service-defaults
+  restart: always
+  init: true                 # tiny init as PID 1: forwards stop signals, reaps zombie processes
+  stop_grace_period: 30s
+  networks: [app]
+  labels:
+    com.zemenbank.smartbranch.autoheal: "true"
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "10"
+
+services:
+  backend:
+    <<: *service-defaults
+    image: smartbranch/backend:${IMAGE_TAG:?Set IMAGE_TAG in .env}
+    build:
+      context: ${SRC_DIR:-../../..}/smart_branch_backend
+    container_name: smartbranch-backend
+    env_file: env/backend.env
+    environment:
+      NODE_ENV: production
+      PORT: "5000"
+      TZ: ${TZ:-Africa/Addis_Ababa}
+      ORACLE_CLIENT_PATH: /opt/oracle/instantclient
+      # Trust X-Forwarded-For only from containers on this network (the backoffice's nginx),
+      # so every staff PC gets its own rate-limit budget instead of sharing the proxy's.
+      TRUST_PROXY: ${APP_SUBNET:-172.28.10.0/24}
+      # FlexCube sessions this app keeps open (fixed-size pool). See .env.example.
+      FLEXCUBE_POOL_MAX: ${FLEXCUBE_POOL_MAX:-20}
+    ports:
+      - "${BACKEND_PORT:-5000}:5000"
+    volumes:
+      # Uploaded documents. The directory must exist and belong to uid 1000 (setup-host.sh app);
+      # create_host_path: false makes a missing directory a startup error instead of a
+      # root-owned empty folder the app cannot write to.
+      - type: bind
+        source: ${DATA_DIR:-/opt/smartbranch/data}/backend-uploads
+        target: /app/uploads
+        bind:
+          create_host_path: false
+
+  frontend:
+    <<: *service-defaults
+    image: smartbranch/frontend:${IMAGE_TAG:?Set IMAGE_TAG in .env}
+    build:
+      context: ${SRC_DIR:-../../..}/Smart_Branch
+      args:
+        # Compiled into the browser JavaScript — change them, then rebuild the image.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?Set NEXT_PUBLIC_API_URL in .env}
+        NEXT_PUBLIC_FINGERPRINT_WS_URL: ${FINGERPRINT_WS_URL:-ws://localhost:8089}
+        NEXT_PUBLIC_RESPONSE_ENCRYPTION_KEY: ${NEXT_PUBLIC_RESPONSE_ENCRYPTION_KEY:?Set NEXT_PUBLIC_RESPONSE_ENCRYPTION_KEY in .env}
+    container_name: smartbranch-frontend
+    env_file: env/frontend.env
+    environment:
+      NODE_ENV: production
+      TZ: ${TZ:-Africa/Addis_Ababa}
+      ORACLE_CLIENT_PATH: /opt/oracle/instantclient
+      # Server-side calls go straight to the backend container over the private network.
+      EXPRESS_BACKEND_URL: http://backend:5000
+      # FlexCube sessions this app keeps open (fixed-size pool). See .env.example.
+      FLEXCUBE_POOL_MAX: ${FLEXCUBE_POOL_MAX:-20}
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      backend:
+        condition: service_started
+
+  backoffice:
+    <<: *service-defaults
+    image: smartbranch/backoffice:${IMAGE_TAG:?Set IMAGE_TAG in .env}
+    build:
+      context: ${SRC_DIR:-../../..}/smart_branch_backoffice
+      args:
+        # Compiled into the browser JavaScript — change it, then rebuild the image.
+        VITE_FINGERPRINT_WS_URL: ${FINGERPRINT_WS_URL:-ws://localhost:8089}
+    container_name: smartbranch-backoffice
+    environment:
+      TZ: ${TZ:-Africa/Addis_Ababa}
+    ports:
+      - "${BACKOFFICE_PORT:-4000}:4000"
+    depends_on:
+      backend:
+        condition: service_started
+
+networks:
+  app:
+    name: smartbranch
+    ipam:
+      config:
+        # Fixed and documented so it can be checked against the bank's address plan:
+        # it must not overlap any network these servers talk to (FlexCube is on 10.1.1.x).
+        - subnet: ${APP_SUBNET:-172.28.10.0/24}
