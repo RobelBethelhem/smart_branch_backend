@@ -369,6 +369,8 @@ eCheckSchema.index({ status: 1 });
 eCheckSchema.index({ account_number: 1, request_date: -1 });
 // Compound indexes matching the list-screen query+sort shapes.
 eCheckSchema.index({ branch: 1, status: 1, request_date: -1 });
+// Teller auto-assignment counts today's tickets per teller in a branch (assignTellerBySystem).
+eCheckSchema.index({ branch: 1, assigned_date: 1, assigned_to: 1 });
 eCheckSchema.index({ assigned_to: 1, request_date: -1 });
 eCheckSchema.index({ status: 1, posted_date: -1 });
 // Date-range views: all branches (Branch_Management, admin search) and one branch's history.

@@ -632,11 +632,37 @@ const router = Router();
 
 
 
+// The customer can change or cancel a request by its code only while it is still pending
+// (requested) or assigned, that is, before a teller has acted on it. After that the record must
+// stay what the bank acted on: a request that is waiting for a checker, posted, authorized,
+// audited, rejected or expired can no longer be touched from the customer app.
+// (assigned_by_csr is "assigned" too: assigned by a customer-service officer instead of the system.)
+const CUSTOMER_EDITABLE_STATUSES = ['requested', 'assigned', 'assigned_by_csr'];
+const REQUEST_LOCKED_MESSAGE = "This request is already being processed and can no longer be changed or cancelled. Please see the teller.";
+
+// Finds today's request for a code in one collection and says whether the customer may still
+// change it. Returns { request } or { status, message } for the answer to send.
+async function findCustomerEditableRequest(Model, Customer_Unique_Number, today) {
+    const request = await Model.findOne({ Customer_Unique_Number, request_date: { $gte: today } })
+        .select('status').lean();
+    if (!request) return { status: 404, message: "Transaction not found" };
+    if (!CUSTOMER_EDITABLE_STATUSES.includes(request.status)) return { status: 400, message: REQUEST_LOCKED_MESSAGE };
+    return { request };
+}
+
 // Lock name for the checker's approval: the same name the maker's posting route uses for that
 // kind of transaction, so a posting and an approval of one transaction cannot overlap.
 const checkerLockKind = (req) => {
     const type = req.body?.transaction_type;
     return type === 'E-Check' ? 'ECheck' : type;
+};
+
+// One line for every SMS that carries a request's reference code. The request, and with it the
+// code, expires at the end of the day it was made (utils/rms/requestExpiry.js). The date is
+// spelled out because the customer may read the message on a later day.
+const codeValiditySms = (requestDate) => {
+    const day = new Date(requestDate || Date.now()).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+    return `This code is valid only for today (${day}).`;
 };
 
 // Sends an SMS without making the caller wait for the gateway. The customer's request used to
@@ -1007,7 +1033,7 @@ router.post("/deposit", async(req, res, next) => {
 
 
             // Construct SMS content based on assignment status
-            let smsContent = `Dear ${newDeposit.acc_holder_name},\n\nYour unique code is **${newDeposit.Customer_Unique_Number}**.\n\n`;
+            let smsContent = `Dear ${newDeposit.acc_holder_name},\n\nYour unique code is **${newDeposit.Customer_Unique_Number}**.\n${codeValiditySms(newDeposit.request_date)}\n\n`;
             
             if (newDeposit.assigned_to) {
                 smsContent += `Please visit Teller **${newDeposit.assigned_to}** for assistance. `;
@@ -1203,7 +1229,7 @@ router.post("/withdraw", async(req, res, next) => {
 
 
             // Construct SMS content based on assignment status
-            let smsContent = `Dear ${newWithdraw.acc_holder_name}.\n\nYour unique code is **${newWithdraw.Customer_Unique_Number}**.\n\n`;
+            let smsContent = `Dear ${newWithdraw.acc_holder_name}.\n\nYour unique code is **${newWithdraw.Customer_Unique_Number}**.\n${codeValiditySms(newWithdraw.request_date)}\n\n`;
             
             if (newWithdraw.assigned_to) {
                 smsContent += `Please visit Teller **${newWithdraw.assigned_to}** for assistance. `;
@@ -1403,7 +1429,7 @@ router.post("/echeck", async(req, res, next) => {
             phoneNumber = phoneNumber.replace('+', '').replace(/^0/, '251');
 
             // Construct SMS content based on assignment status
-            let smsContent = `Dear ${newECheck.acc_holder_name}.\n\nYour E-Check unique code is **${newECheck.Customer_Unique_Number}**.\n\n`;
+            let smsContent = `Dear ${newECheck.acc_holder_name}.\n\nYour E-Check unique code is **${newECheck.Customer_Unique_Number}**.\n${codeValiditySms(newECheck.request_date)}\n\n`;
             smsContent += `Recipient: ${newECheck.recipient_full_name} (${newECheck.recipient_phone_number})\n\n`;
 
             if (newECheck.assigned_to) {
@@ -1600,7 +1626,7 @@ router.post("/transfer", async(req, res, next) => {
             
 
             // Construct SMS content based on assignment status
-            let smsContent = `Dear  ${newTransfer.acc_holder_name},\n\nYour unique code is **${newTransfer.Customer_Unique_Number}**.\n\n`;
+            let smsContent = `Dear  ${newTransfer.acc_holder_name},\n\nYour unique code is **${newTransfer.Customer_Unique_Number}**.\n${codeValiditySms(newTransfer.request_date)}\n\n`;
             
             if (newTransfer.assigned_to) {
                 smsContent += `Please visit Teller **${newTransfer.assigned_to}** for assistance. `;
@@ -1793,7 +1819,7 @@ router.post("/other_bank_transfer", async(req, res, next) => {
             
 
             // Construct SMS content based on assignment status
-            let smsContent = `Dear Customer, ${newOtherBankTransfer.acc_holder_name}.\n\nYour unique code is **${newOtherBankTransfer.Customer_Unique_Number}**.\n\n`;
+            let smsContent = `Dear Customer, ${newOtherBankTransfer.acc_holder_name}.\n\nYour unique code is **${newOtherBankTransfer.Customer_Unique_Number}**.\n${codeValiditySms(newOtherBankTransfer.request_date)}\n\n`;
             
             if (newOtherBankTransfer.assigned_to) {
                 smsContent += `Please visit Teller **${newOtherBankTransfer.assigned_to}** for assistance. `;
@@ -2475,7 +2501,9 @@ router.put("/edit_smart_branch_request", async(req, res, next) => {
             beneficiary_name,
             payment_narration,
             beneficiary_bank,
-            beneficiary_branch
+            beneficiary_branch,
+            recipient_full_name,
+            recipient_phone_number
         } = body;
 
         // Validate required fields
@@ -2513,64 +2541,56 @@ router.put("/edit_smart_branch_request", async(req, res, next) => {
             });
         }
 
+        // Which collection, and what else besides the amount the customer may change there.
+        let Model;
         let update = {};
-        let result;
-
         switch(request_type.toLowerCase()) {
             case "withdraw":
-                update = {
-                    amount_in_figures,
-                    amount_in_words
-                };
-                result = await Withdraw.findOneAndUpdate(
-                    { Customer_Unique_Number },
-                    update,
-                    { new: true }
-                );
+                Model = Withdraw;
+                break;
+
+            case "deposit":
+                Model = Deposit;
                 break;
 
             case "transfer":
+                Model = Transfer;
                 update = {
-                    amount_in_figures,
-                    amount_in_words,
                     beneficiary_name,
                     payment_narration,
                     beneficiary_account_number
                 };
-                result = await Transfer.findOneAndUpdate(
-                    { Customer_Unique_Number },
-                    update,
-                    { new: true }
-                );
                 break;
 
             case "other_bank_transfer":
+                Model = Other_Bank_Transfer;
                 update = {
-                    amount_in_figures,
-                    amount_in_words,
                     beneficiary_name,
                     payment_narration,
                     beneficiary_account_number,
                     beneficiary_bank,
                     beneficiary_branch
                 };
-                result = await Other_Bank_Transfer.findOneAndUpdate(
-                    { Customer_Unique_Number },
-                    update,
-                    { new: true }
-                );
                 break;
 
-            case "deposit":
-                update = {
-                    amount_in_figures,
-                    amount_in_words
-                };
-                result = await Deposit.findOneAndUpdate(
-                    { Customer_Unique_Number },
-                    update,
-                    { new: true }
-                );
+            case "echeck":
+            case "e-check":
+                // Like a withdrawal, plus the person who collects the cash. The recipient is
+                // changed only when a new value is sent; it can never be emptied.
+                Model = ECheck;
+                if (recipient_full_name !== undefined) {
+                    if (!String(recipient_full_name).trim()) {
+                        return res.status(400).json({ error: true, message: "Recipient full name is required for E-Check" });
+                    }
+                    update.recipient_full_name = String(recipient_full_name).trim();
+                }
+                if (recipient_phone_number !== undefined) {
+                    // Same rule as the customer app applies when the e-cheque is made.
+                    if (!/^(\+251|0)?[79]\d{8}$/.test(String(recipient_phone_number).replace(/\s/g, ''))) {
+                        return res.status(400).json({ error: true, message: "Recipient phone number is not valid" });
+                    }
+                    update.recipient_phone_number = String(recipient_phone_number).trim();
+                }
                 break;
 
             default:
@@ -2580,11 +2600,36 @@ router.put("/edit_smart_branch_request", async(req, res, next) => {
                 });
         }
 
+        // Only a pending or assigned request may be changed.
+        const found = await findCustomerEditableRequest(Model, Customer_Unique_Number, today);
+        if (!found.request) {
+            return res.status(found.status).json({ error: true, message: found.message });
+        }
+
+        // The record is not validated again when it is saved here, and the posting step reads
+        // the amount with parseFloat ("1,000" would be posted as 1) and saves the record only
+        // AFTER FlexCube has been called. So nothing invalid may be stored.
+        const amount = parseFloat(amount_in_figures);
+        if (!amount_in_figures || isNaN(amount) || amount <= 0 || !/^\d+(\.\d+)?$/.test(String(amount_in_figures).trim())) {
+            return res.status(400).json({ error: true, message: "Invalid amount" });
+        }
+        if (!amount_in_words || !String(amount_in_words).trim()) {
+            return res.status(400).json({ error: true, message: "Amount in words is required" });
+        }
+        update = {
+            amount_in_figures: String(amount_in_figures).trim(),
+            amount_in_words: String(amount_in_words).trim(),
+            ...update
+        };
+
+        const result = await Model.findOneAndUpdate(
+            { _id: found.request._id, status: { $in: CUSTOMER_EDITABLE_STATUSES } },
+            update,
+            { new: true }
+        );
         if (!result) {
-            return res.status(404).json({
-                error: true,
-                message: "Transaction not found"
-            });
+            // A teller acted on it between the check and the update.
+            return res.status(400).json({ error: true, message: REQUEST_LOCKED_MESSAGE });
         }
 
         return res.status(200).json({
@@ -2653,23 +2698,29 @@ router.delete("/delete_smart_branch_request", async(req, res, next) => {
             });
         }
 
-        let result;
-
+        let Model;
         switch(request_type.toLowerCase()) {
             case "withdraw":
-                result = await Withdraw.findOneAndDelete({ Customer_Unique_Number });
+                Model = Withdraw;
+                break;
+
+            case "echeck":
+            case "e-check":
+                Model = ECheck;
                 break;
 
             case "transfer":
-                result = await Transfer.findOneAndDelete({ Customer_Unique_Number });
+                Model = Transfer;
                 break;
 
             case "other_bank_transfer":
-                result = await OtherBankTransfer.findOneAndDelete({ Customer_Unique_Number });
+                // (This used to name "OtherBankTransfer", which does not exist, so cancelling
+                // an other-bank transfer always failed with a server error.)
+                Model = Other_Bank_Transfer;
                 break;
 
             case "deposit":
-                result = await Deposit.findOneAndDelete({ Customer_Unique_Number });
+                Model = Deposit;
                 break;
 
             default:
@@ -2679,11 +2730,15 @@ router.delete("/delete_smart_branch_request", async(req, res, next) => {
                 });
         }
 
+        // Only a pending or assigned request may be cancelled.
+        const found = await findCustomerEditableRequest(Model, Customer_Unique_Number, today);
+        if (!found.request) {
+            return res.status(found.status).json({ error: true, message: found.message });
+        }
+        const result = await Model.findOneAndDelete({ _id: found.request._id, status: { $in: CUSTOMER_EDITABLE_STATUSES } });
         if (!result) {
-            return res.status(404).json({
-                error: true,
-                message: "Transaction not found"
-            });
+            // A teller acted on it between the check and the delete.
+            return res.status(400).json({ error: true, message: REQUEST_LOCKED_MESSAGE });
         }
 
         return res.status(200).json({
@@ -2727,6 +2782,7 @@ router.post("/get_account_number_by_reference_number", async (req, res, next) =>
 
         const deposits = await Deposit.find(searchQuery);
         const withdraws = await Withdraw.find(searchQuery);
+        const echecks = await ECheck.find(searchQuery);
         const transfers = await Transfer.find(searchQuery);
         const otherBankTransfers = await Other_Bank_Transfer.find(searchQuery);
         const airTicketPayments = await Air_Ticket_Payment.find(searchQuery);
@@ -2734,6 +2790,7 @@ router.post("/get_account_number_by_reference_number", async (req, res, next) =>
         // Combine all transactions
         const transactions = [
             ...withdraws,
+            ...echecks,
             ...deposits,
             ...transfers,
             ...otherBankTransfers,
@@ -2770,6 +2827,15 @@ router.post("/get_account_number_by_reference_number", async (req, res, next) =>
                     };
                 }
         
+                // An e-cheque also names the person who collects the cash.
+                if (t.request_type === 'ECheck') {
+                    return {
+                        ...baseInfo,
+                        recipient_full_name: t.recipient_full_name || null,
+                        recipient_phone_number: t.recipient_phone_number || null
+                    };
+                }
+
                 // For other request types, return base info only
                 return baseInfo;
             });
@@ -3073,7 +3139,7 @@ router.get("/get_posted_data", auth, roleCheck(["Authorizer","Teller"]), async(r
         };
 
         // Fetch transactions from all models with status 'posted' and matching branch
-        const [deposits, withdraws, transfers, otherBankTransfers, airTicketPayments] = await Promise.all([
+        const [deposits, withdraws, echecks, transfers, otherBankTransfers, airTicketPayments] = await Promise.all([
             Deposit.find({ 
                 status: 'posted',
                 branch: user.branch,
@@ -3081,6 +3147,13 @@ router.get("/get_posted_data", auth, roleCheck(["Authorizer","Teller"]), async(r
             }).sort({ request_date: -1 }),
             
             Withdraw.find({ 
+                status: 'posted',
+                branch: user.branch,
+                ...dateFilter
+            }).sort({ request_date: -1 }),
+
+            // E-cheques are posted like withdrawals and follow the same steps.
+            ECheck.find({ 
                 status: 'posted',
                 branch: user.branch,
                 ...dateFilter
@@ -3115,6 +3188,10 @@ router.get("/get_posted_data", auth, roleCheck(["Authorizer","Teller"]), async(r
                 ...t.toObject(),
                 transactionType: 'withdraw'
             })),
+            ...echecks.map(t => ({
+                ...t.toObject(),
+                transactionType: 'echeck'
+            })),
             ...transfers.map(t => ({
                 ...t.toObject(),
                 transactionType: 'transfer'
@@ -3141,6 +3218,7 @@ router.get("/get_posted_data", auth, roleCheck(["Authorizer","Teller"]), async(r
             byType: {
                 deposits: deposits.length,
                 withdraws: withdraws.length,
+                echecks: echecks.length,
                 transfers: transfers.length,
                 otherBankTransfers: otherBankTransfers.length,
                 airTicketPayments: airTicketPayments.length
@@ -3199,7 +3277,7 @@ router.get("/get_authorized_data", auth, roleCheck(["Auditor","Teller"]), async(
 
         // Fetch this branch's transactions the Auditor can act on: status
         // 'posted' OR 'authorized' (the audit step accepts both), matching branch.
-        const [deposits, withdraws, transfers, otherBankTransfers, airTicketPayments] = await Promise.all([
+        const [deposits, withdraws, echecks, transfers, otherBankTransfers, airTicketPayments] = await Promise.all([
             Deposit.find({ 
                 status: { $in: ['posted', 'authorized'] },
                 branch: user.branch,
@@ -3207,6 +3285,13 @@ router.get("/get_authorized_data", auth, roleCheck(["Auditor","Teller"]), async(
             }).sort({ request_date: -1 }),
             
             Withdraw.find({ 
+                status: { $in: ['posted', 'authorized'] },
+                branch: user.branch,
+                ...dateFilter
+            }).sort({ request_date: -1 }),
+
+            // E-cheques are posted like withdrawals and follow the same steps.
+            ECheck.find({ 
                 status: { $in: ['posted', 'authorized'] },
                 branch: user.branch,
                 ...dateFilter
@@ -3241,6 +3326,10 @@ router.get("/get_authorized_data", auth, roleCheck(["Auditor","Teller"]), async(
                 ...t.toObject(),
                 transactionType: 'withdraw'
             })),
+            ...echecks.map(t => ({
+                ...t.toObject(),
+                transactionType: 'echeck'
+            })),
             ...transfers.map(t => ({
                 ...t.toObject(),
                 transactionType: 'transfer'
@@ -3267,6 +3356,7 @@ router.get("/get_authorized_data", auth, roleCheck(["Auditor","Teller"]), async(
             byType: {
                 deposits: deposits.length,
                 withdraws: withdraws.length,
+                echecks: echecks.length,
                 transfers: transfers.length,
                 otherBankTransfers: otherBankTransfers.length,
                 airTicketPayments: airTicketPayments.length
@@ -3337,6 +3427,10 @@ router.post("/transaction_authorized", auth, roleCheck(["Teller", "Authorizer"])
                     break;
                 case 'withdraw':
                     Model = Withdraw;
+                    break;
+                case 'echeck':
+                case 'e-check':  // posted like a withdrawal, so it is authorized and audited like one
+                    Model = ECheck;
                     break;
                 case 'transfer':
                     Model = Transfer;
@@ -3658,6 +3752,10 @@ router.post("/transaction_audited", auth, roleCheck(["Auditor"]), async(req, res
                     break;
                 case 'withdraw':
                     Model = Withdraw;
+                    break;
+                case 'echeck':
+                case 'e-check':  // posted like a withdrawal, so it is authorized and audited like one
+                    Model = ECheck;
                     break;
                 case 'transfer':
                     Model = Transfer;
@@ -4599,13 +4697,15 @@ async function assignTellerBySystem(branch) {
         const today = new Date();
         today.setHours(0, 0, 0, 0);
         
-        // One grouped query per collection (5 in total) instead of 5 counts per teller on
-        // every ticket. Same numbers as the per-teller countDocuments it replaces: the filter
-        // goes through the same schema casting, and tellers with no tickets today count as 0.
+        // One grouped query per collection instead of one count per collection per teller on
+        // every ticket. The filter goes through the same schema casting as a find(), and
+        // tellers with no tickets today count as 0.
         // Uses the { branch, assigned_date, assigned_to } index.
+        // E-cheques are included: a teller serving e-cheques is as busy as one serving
+        // withdrawals. (They were left out, so that teller looked free and got more tickets.)
         const tellerNames = [...new Set(tellers.map(teller => teller.user))];
         const perCollection = await Promise.all(
-            [Deposit, Withdraw, Transfer, Other_Bank_Transfer, Air_Ticket_Payment].map(Model =>
+            [Deposit, Withdraw, ECheck, Transfer, Other_Bank_Transfer, Air_Ticket_Payment].map(Model =>
                 Model.aggregate([
                     { $match: Model.find().cast(Model, {
                         branch: branch,

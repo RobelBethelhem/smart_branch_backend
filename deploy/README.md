@@ -403,9 +403,11 @@ A customer's request and its reference code are valid until **midnight of the da
 | Request at midnight | What happens |
 |---|---|
 | Not posted to FlexCube yet (requested, assigned, waiting for a checker) | Status becomes `expired`. It can no longer be assigned, posted or approved. The customer makes a new request. The record is kept, with `expired_at`, `expiry_reason` and `status_before_expiry` |
-| Posted, not authorized | Never expires. Stays in the Authorizer's list, marked "Overdue" |
+| Posted, not authorized (deposit, withdraw, e-cheque, transfer, other-bank transfer) | Never expires. Stays in the Authorizer's list, marked "Overdue" |
 | Posted or authorized, not audited | Never expires. Stays in the Auditor's list, marked "Overdue" |
 
+- The customer is told: the SMS with the code says "This code is valid only for today
+  (10 Nov 2026)."
 - The backend marks expired requests when it starts and every 10 minutes after that. The log
   line is `[REQUEST_EXPIRY] N request(s) ... are now expired`. The posting routes also check the
   date themselves, so nothing can be posted in the minutes before the next run.
@@ -440,6 +442,10 @@ In the MongoDB shell: `db.getSiblingDB('admin').changeUserPassword('smartbranch_
 ---
 
 ## Building without internet on the servers
+
+⚠ **The `2026.11.10-1` archives are out of date.** They were built before the Branch Record
+changes, the end-of-day expiry and the e-cheque fixes. Do not go live with them: build on the
+server (`deploy.sh`), or build and export a new set as described at the end of this section.
 
 **Ready-made images for release `2026.11.10-1`** were exported on the build PC
 (`D:\Full Smart Branch\images`; they are too large for git):
