@@ -76,6 +76,16 @@ backoffice's `Branch_Record/recordFormat.js`.
 
 "End of the day" is midnight on the server clock, not the branch's closing time.
 
+## Found while deploying on the real servers (November 2026)
+
+| # | Problem | State |
+|---|---|---|
+| S1 | The first request on every new pooled FlexCube connection never returned, and the pool counted that connection as in use for ever. Customers saw "loading" until they refreshed; after as many such requests as the pool has connections, every FlexCube call failed after 60 s until a restart. Cause: `initSession` in `lib/db.js` and `lib/db.ts` (in the code since July 2026) did not tell the Oracle driver that it had finished. The system in production has the same code, so it has the same fault | **Fixed** in both apps (README, "FlexCube requests that hung on first use"). My first diagnosis, idle connections dropped by the network, was wrong. A keep-alive on idle connections stays in as a precaution |
+| S2 | On the app server, port 5000 is held on `127.0.0.1` by Nutanix Guest Tools, so the backend could not start | **Handled** by a setting: `BACKEND_PORT=10.1.2.132:5000` in `app-server/.env` |
+| S3 | The app server's clock was three hours ahead and its zone was New York | Set by hand. **Open:** the clock is not synchronised (`timedatectl` says `System clock synchronized: no`). Check the DB server as well |
+| S4 | The DB server has no host firewall, and both servers are in the same subnet, so the network firewall does not see the traffic between them | **Open:** allow port 27017 from 10.1.2.132 only, on the DB server itself (ufw) |
+| S5 | When a FlexCube query fails, the customer app answers "Account not found" (404), the same as for an account that does not exist | **Open**, behaviour unchanged: a customer cannot tell "not found" from "FlexCube did not answer". The backend log shows the real error |
+
 ## Performance work that was deferred
 
 ### Needs FlexCube / DBA testing (SQL changes)

@@ -73,6 +73,18 @@ must work) and `git`. Install Docker from its own repositories:
 <https://docs.docker.com/engine/install/> (packages `docker-ce`, `docker-ce-cli`,
 `containerd.io`, `docker-compose-plugin`).
 
+Learned on the real servers (the DB server is Ubuntu 24.04, the app server Oracle Linux 10):
+- **Oracle Linux / RHEL:** there is no `apt-get`. Install with `dnf` from Docker's CentOS
+  repository (`sudo dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo`,
+  then the same five packages, then `sudo systemctl enable --now docker`). When the shell
+  offers to install `podman-docker`, answer **N**: it only imitates Docker.
+- **Check the clock before the first start:** `timedatectl` must show the right local time and
+  the zone `Africa/Addis_Ababa`. The app server came with the zone New York and a clock three
+  hours ahead. Requests expire at midnight by this clock. If `System clock synchronized` says
+  `no`, have the server pointed at the bank's time server, or the clock drifts.
+- **Ping is blocked** on the bank network; test internet access with
+  `curl -I https://github.com` instead.
+
 **Building needs internet** (GitHub, Docker Hub, npm, download.oracle.com, Google Fonts). If the
 app server has no internet access, build on another machine and copy the images over. See
 [Building without internet](#building-without-internet-on-the-servers).
@@ -395,6 +407,36 @@ as assigned or pending, and the system refuses to post it again.
    If FlexCube does NOT have the reference after all, only delete the `unrecordedpostings`
    record; the transaction can then be posted normally.
 
+### FlexCube requests that hung on first use
+
+Found on the new servers (November 2026), fixed in `lib/db.js` (backend) and `lib/db.ts`
+(customer app). The first customer after a start waited on "loading" for ever; after a page
+refresh it worked; later it came back. Sometimes every FlexCube request failed after exactly
+60 seconds until the app was restarted.
+
+Cause: a mistake in the code that prepares a new FlexCube connection (`initSession`, in the
+code since July 2026). The Oracle driver waits for that step to report "done", and it never
+did. So the first request on every new pooled connection never returned, and the pool counted
+that connection as in use for ever. After as many such requests as the pool has connections,
+every FlexCube call waited the pool's 60 seconds and failed. A new connection appears at
+start, when two requests overlap, and when FlexCube or the network closed an old one.
+
+Measured before the fix: first account look-up no answer after 180 s, the same look-up again
+0.01 s; backend exactly 60 s; a new FlexCube log-on 0.04 s.
+
+Check it with `sudo bash flexcube-check.sh` in `app-server/`, right after a start: every line
+must take well under a second, the first one included.
+
+A log line `[FLEXCUBE] waited N ms for a pooled connection (x of y in use)` means a request
+could not get a FlexCube connection quickly. It does not mean a slow query.
+
+**Keep-alive (a precaution, not part of that fix).** Both apps keep their FlexCube connections
+open while idle, and a firewall sits between the app server and FlexCube. Both apps therefore
+add `expire_time=1` to the connection string (`withKeepAlive`): a probe every minute on idle
+connections. `FLEXCUBE_EXPIRE_TIME` in `env/backend.env` and `env/frontend.env` changes the
+minutes; `0` switches it off. Whether this network really drops idle connections was not
+established. To find out, leave the apps untouched for 30 minutes and run the check again.
+
 ### Requests expire at the end of the day
 
 A customer's request and its reference code are valid until **midnight of the day it was made**
@@ -491,6 +533,8 @@ time, so build with the production `.env`, not a test one.
 | Backoffice build stops with `exit code: 135` or `139`, or hangs at "transforming…" | Seen about one time in five on Docker Desktop for Windows, where the Docker engine itself was unstable. Run the build again. If it ever happens on the Linux server, note the exit code and report it |
 | "This transaction is already being processed" | Someone (or a second click) is posting the same transaction. Wait and refresh; it protects against double posting |
 | `port is already allocated` | An old app still holds the port: `sudo ss -ltnp \| grep :5000` |
+| `failed to bind host port 0.0.0.0:5000/tcp: address already in use` | Another program holds the port on `127.0.0.1` only (on the app server: Nutanix Guest Tools). Do not stop it. Set `BACKEND_PORT=10.1.2.132:5000` in `.env` (see `.env.example`), then `sudo bash deploy.sh --no-build` |
+| The first customer after a start waits for ever, a refresh helps; or every FlexCube request fails after 60 s | See [FlexCube requests that hung on first use](#flexcube-requests-that-hung-on-first-use). Fixed in the code; if it returns, look for `[FLEXCUBE] waited` in the logs |
 | Mongo container keeps restarting, log says `Illegal instruction` | The CPU lacks AVX (see step 1) |
 | Backend log: `MongoDB error … Authentication failed` | Wrong password, missing `?authSource=admin`, or Windows line endings in the env file. `setup-host.sh` fixes line endings; re-run it |
 | Backend log: `Cannot find module …` | A file-name case mismatch (works on Windows, not Linux). Rename the file to the case used in the import |
