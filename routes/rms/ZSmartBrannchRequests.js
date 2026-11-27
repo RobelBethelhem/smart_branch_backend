@@ -23,6 +23,7 @@ import * as FlexcubeTransactionService from '../../services/FlexcubeTransactionS
 import { withPostingLock } from '../../utils/rms/postingLock.js';
 import { computeBranchStats, STATS_PROJECTION } from '../../utils/rms/branchStats.js';
 import { isExpiredRequest, carryOverStart, EXPIRED_MESSAGE } from '../../utils/rms/requestExpiry.js';
+import { recordArrival, recordArrivalById, moveArrivals } from '../../utils/rms/customer360/arrivals.js';
 import CustomerCategoryLimit from '../../models/rms/CustomerCategoryLimit.js';
 import MakerCheckerThreshold from '../../models/rms/MakerCheckerThreshold.js';
 import crypto from 'crypto';
@@ -744,6 +745,8 @@ router.post("/transaction_reassigned", auth, roleCheck(["Admin", "Authorizer"]),
 
         // Wait for all updates to complete
         await Promise.all(updatePromises);
+        // Customer 360: the customer's arrival goes with the request to the new teller.
+        moveArrivals(transactions.map((transaction) => transaction.id), assignedUser);
 
         return res.status(200).json({ 
             success: true, 
@@ -1015,6 +1018,8 @@ router.post("/deposit", async(req, res, next) => {
 
         const newDeposit = new Deposit(depositData);
         await newDeposit.save();
+        // Customer 360: the customer was sent to a teller (nothing is recorded without one).
+        if (newDeposit.assigned_to) recordArrival(newDeposit, 'deposit', 'system');
         
         const customerNumber = newDeposit.account_number.substring(6, 13);
 
@@ -1209,6 +1214,8 @@ router.post("/withdraw", async(req, res, next) => {
 
         const newWithdraw = new Withdraw(withdrawData);
         await newWithdraw.save();
+        // Customer 360: the customer was sent to a teller (nothing is recorded without one).
+        if (newWithdraw.assigned_to) recordArrival(newWithdraw, 'withdraw', 'system');
 
 
 
@@ -1413,6 +1420,8 @@ router.post("/echeck", async(req, res, next) => {
 
         const newECheck = new ECheck(eCheckData);
         await newECheck.save();
+        // Customer 360: the customer was sent to a teller (nothing is recorded without one).
+        if (newECheck.assigned_to) recordArrival(newECheck, 'echeck', 'system');
 
         const customerNumber = newECheck.account_number.substring(6, 13);
 
@@ -1605,6 +1614,8 @@ router.post("/transfer", async(req, res, next) => {
 
         const newTransfer = new Transfer(transferData);
         await newTransfer.save();
+        // Customer 360: the customer was sent to a teller (nothing is recorded without one).
+        if (newTransfer.assigned_to) recordArrival(newTransfer, 'transfer', 'system');
 
 
 
@@ -1800,6 +1811,8 @@ router.post("/other_bank_transfer", async(req, res, next) => {
 
         const newOtherBankTransfer = new Other_Bank_Transfer(transferData);
         await newOtherBankTransfer.save();
+        // Customer 360: the customer was sent to a teller (nothing is recorded without one).
+        if (newOtherBankTransfer.assigned_to) recordArrival(newOtherBankTransfer, 'other_bank_transfer', 'system');
 
 
         const customerNumber = newOtherBankTransfer.account_number.substring(6, 13);
@@ -2232,6 +2245,8 @@ router.post("/assigned_to_me", auth, roleCheck(["Teller", "Maker"]), async(req, 
             if (updateResult.modifiedCount > 0) {
                 updateResults.totalModified += 1;
                 updateResults.details[type] = (updateResults.details[type] || 0) + 1;
+                // Customer 360: the customer is with this teller now.
+                recordArrivalById(Model, transaction.id, type, 'teller');
             }
         }
 

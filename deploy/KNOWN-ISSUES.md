@@ -86,6 +86,19 @@ backoffice's `Branch_Record/recordFormat.js`.
 | S4 | The DB server has no host firewall, and both servers are in the same subnet, so the network firewall does not see the traffic between them | **Open:** allow port 27017 from 10.1.2.132 only, on the DB server itself (ufw) |
 | S5 | When a FlexCube query fails, the customer app answers "Account not found" (404), the same as for an account that does not exist | **Open**, behaviour unchanged: a customer cannot tell "not found" from "FlexCube did not answer". The backend log shows the real error |
 
+## Customer 360 (added November 2026): what it does not do
+
+| # | Limitation | Why / what would change it |
+|---|---|---|
+| C1 | Every section shows **demo data** until the Super Admin switches it to a live query. Demo sections are marked on the page | The sample queries were written from the tables this system already reads and have not been run against FlexCube. Each needs a check with the Run button |
+| C2 | The "Relationship summary" is text from demo rows or from a query. There is **no AI** behind it | An AI summary needs a language model the servers can reach, which they cannot today |
+| C3 | "Customer scores" (relationship health, churn risk, credit score, satisfaction) have no source in FlexCube | They need a table that the bank fills; the section's query then reads it |
+| C4 | No system (desktop) notification on the branch PCs, and nothing when the backoffice is not open in a tab | The browsers' push service needs the internet, system notifications need HTTPS. With HTTPS the bell menu offers desktop notifications |
+| C5 | A notification can be up to 8 seconds late, up to a minute in a background tab | The backoffice asks the server on a timer. A permanent connection (server-sent events) would make it immediate; it needs changes in the nginx proxy |
+| C6 | A request assigned by a CSR does not produce a notification | Only the two cases asked for are covered: assigned by the system, taken by the teller |
+| C7 | The Super Admin can read any FlexCube data through a section query | By design (the developer writes the queries). Keep the role rare and the FlexCube user read-only |
+| C8 | `customer360audits` grows by one record per page view and is never cleared | An audit trail should not delete itself. Archive it with the other audit data |
+
 ## Performance work that was deferred
 
 ### Needs FlexCube / DBA testing (SQL changes)

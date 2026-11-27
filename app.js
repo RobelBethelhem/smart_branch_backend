@@ -38,6 +38,7 @@ import Guaranty from "./routes/rms/Guaranty.js";
 import ZSmartBrannchRequests from "./routes/rms/ZSmartBrannchRequests.js";
 import LimitManagement from "./routes/rms/LimitManagement.js";
 import InteractionLogRoutes from "./routes/rms/InteractionLog.js";
+import Customer360Routes from "./routes/rms/customer360.js";
 
 
 
@@ -199,6 +200,7 @@ app.use("/api/rms/admin", [
   app.use("/api/zsmart_branch_requests", ZSmartBrannchRequests);
   app.use("/api/limit-management", LimitManagement);
   app.use("/api/interaction_logs", InteractionLogRoutes);
+  app.use("/api/customer360", Customer360Routes);
 
 
 

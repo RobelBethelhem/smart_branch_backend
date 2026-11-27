@@ -437,6 +437,69 @@ connections. `FLEXCUBE_EXPIRE_TIME` in `env/backend.env` and `env/frontend.env` 
 minutes; `0` switches it off. Whether this network really drops idle connections was not
 established. To find out, leave the apps untouched for 30 minutes and run the check again.
 
+### Customer 360
+
+When a customer's request gets a teller, the branch sees a notification "… has arrived" in
+the backoffice. Clicking it opens the customer's page: who they are, key figures, scores,
+balance trend, cash flow, channel usage.
+
+**When the notification is made** (`utils/rms/customer360/arrivals.js`)
+
+| Situation | Notification |
+|---|---|
+| The customer asked for a teller and the system chose one | Yes, at once |
+| A teller took a waiting request herself (Assigned To Me) | Yes, at that moment |
+| The customer only wanted a code (no teller yet) | No, until a teller takes the request |
+| A request is given to another teller (Reassignment) | No new one; the existing one moves to that teller |
+
+**Who sees it.** The branch's Admin always. Other roles when the Admin has ticked them under
+Admin → Customer 360 Access (Authorizer is ticked to begin with). Tellers and makers, when
+ticked, see only the customers assigned to them. Other branches never see it.
+
+**How it arrives.** The backoffice asks the server every 8 seconds; a card slides in at the top
+right, the bell shows a count, a short sound plays and the count appears in the tab's title.
+The browsers' own push service needs the internet and system notifications need HTTPS, and
+the branches have neither, so the page has to be open in a tab. Over HTTPS the bell menu also
+offers "Turn on desktop notifications". A tab in the background can be up to a minute late,
+because browsers slow down hidden tabs.
+
+**What the page is made of.** Sections, managed by the Super Admin under Customer 360
+Sections. Every section has demo rows (invented, marked "Demo data" on the page) and a query.
+
+| To do this | Do this |
+|---|---|
+| Show a customer's real data in a section | Edit the section, adjust the query, type a customer number and press **Run**, compare the result with FlexCube, then choose "Live: run the query" and save |
+| Add a section | "Add a section", choose the kind (figures, scores, trend chart, in/out chart, share chart, list of details, text, highlights, table). The sample query and sample rows of that kind are loaded as a start |
+| Take a section off the page | Switch off "Shown" |
+| See the whole page for a customer | "Preview the page" |
+| See who looked at which customer, who revealed hidden details, who changed a query | "Activity log" (collection `customer360audits`) |
+
+Rules for a section query (`utils/rms/customer360/sqlGuard.js`):
+- one `SELECT` (or `WITH … SELECT`), no semicolon, nothing that changes data;
+- the customer comes in through `:cif`, `:account_number` and `:branch_code`, which the server
+  fills in. A query must use `:cif` or `:account_number`;
+- it returns the columns of its kind of section (the editor lists them, e.g. `LABEL`, `VALUE`);
+- it runs in a read-only transaction, with a time limit of 15 s and at most 200 rows;
+- a failing section shows "could not be loaded" on the page; the database's message is only
+  in the Super Admin's preview and in the backend log (`[CUSTOMER360] section "…" failed`).
+
+⚠ **The sample queries have not been run against FlexCube.** They use the tables this system
+already reads, but the column names must be checked, section by section, with Run. The
+"Customer scores" sample points at a table that does not exist: FlexCube has no such scores.
+
+⚠ **A Super Admin can read any FlexCube data this way** (as the FlexCube user of the backend).
+Give that role to very few people, and give the FlexCube user SELECT rights only.
+
+Details marked sensitive (phone, e-mail, ID number) reach the browser masked. "Reveal · logged"
+fetches the real values and records who asked.
+
+Settings in `env/backend.env`, both optional: `CUSTOMER360_QUERY_TIMEOUT_MS` (default 15000),
+`CUSTOMER360_CACHE_SECONDS` (default 120: how long a live result is reused when several
+people open the same customer; 0 switches it off).
+
+To try it without a customer: Customer 360 → "Simulate an arrival" (Admin). The arrival is
+marked "Simulated".
+
 ### Requests expire at the end of the day
 
 A customer's request and its reference code are valid until **midnight of the day it was made**
